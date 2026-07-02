@@ -24,7 +24,7 @@ typedef enum {
 } sys_err_t;
 
 /* =========================================================================
- * 1. 自动分级初始化机制 (Auto-Initcall Section Export)
+ * 1. 自动段自排序初始化机制 (Auto-Initcall Alphabetical Section Export)
  * ========================================================================= */
 
 /**
@@ -34,36 +34,32 @@ typedef enum {
 typedef int (*initcall_t)(void);
 
 /**
- * @brief 编译期段弹射核心宏
- * @param fn 待弹射导出的初始化函数名
- * @param prio 弹射指定的优先级等级（1/2/3）
+ * @brief 初始化调用段元数据结构
+ * 强绑定初始化函数与模块唯一 ID (枚举整数值)
+ */
+typedef struct {
+	initcall_t func;
+	int mod_id;
+} sys_initcall_t;
+
+/**
+ * @brief 通用业务模块自注册宏
+ * @param fn 模块的初始化启动函数名称
+ * @param _mod_id_arg 模块对应的唯一整型 ID (如 SYS_MOD_WIFI 等枚举值)
  *
- * 利用 GCC 的 `__attribute__((used, section(...)))` 属性，强制将函数指针排列到
- * 连续的特殊 ELF 内存段中。链接期由 GNU 链接器自动提取段的首尾物理指针进行遍历执行。
+ * 利用 GCC 的 `__attribute__((used, section(...)))` 属性，将包含函数指针与模块 ID
+ * 的元数据结构体直接放置到特殊的段 `"app_init_sec"` 中。
+ * 运行时由框架层 do_initcalls 对其进行拷贝与排序，按枚举 ID 大小的物理顺序依次拉起。
+ *
+ * 注意：宏参数名特意使用 `_mod_id_arg` 而非 `mod_id`，以避免与结构体指定初始化式
+ * `.mod_id = xxx` 中的字段名 `mod_id` 发生 C 预处理器的命名冲突展开错误。
  */
-#define __app_init_export(fn, prio)                                                                                    \
-	static initcall_t __initcall_##fn __attribute__((used, section("app_init_prio" #prio "_sec"))) = fn
-
-/**
- * @def APP_INIT_PRIO_1
- * @brief 优先级 1：核心/基础设施层初始化宏
- * 用于最底层的总线驱动、内存池、OS 任务管理等最先启动的组件注册
- */
-#define APP_INIT_PRIO_1(fn) __app_init_export(fn, 1)
-
-/**
- * @def APP_INIT_PRIO_2
- * @brief 优先级 2：系统组件/通用业务总线初始化宏
- * 用于 WiFi 驱动、Camera 驱动、数据总线等依赖基础组件的中层模块注册
- */
-#define APP_INIT_PRIO_2(fn) __app_init_export(fn, 2)
-
-/**
- * @def APP_INIT_PRIO_3
- * @brief 优先级 3：应用层业务/高层状态机逻辑初始化宏
- * 用于主业务状态机、整机联动控制等最后被激活的逻辑注册
- */
-#define APP_INIT_PRIO_3(fn) __app_init_export(fn, 3)
+#define APP_INIT_REGISTER(fn, _mod_id_arg) \
+	static const sys_initcall_t __initcall_##fn \
+	__attribute__((used, section("app_init_sec"))) = { \
+		.func = fn, \
+		.mod_id = _mod_id_arg \
+	}
 
 /**
  * @brief 执行所有已导出段函数的遍历初始化
@@ -95,7 +91,7 @@ sys_err_t sys_subsystem_register(int mod_id, void *ops);
  * @brief 注销指定模块的操纵杆
  * @param mod_id 统一的业务引脚槽位 ID
  * @return sys_err_t 注销结果状态码
- * 
+ *
  * 允许在运行阶段动态卸载/注销某个功能组件（配合设备动态热插拔与休眠断电等生命周期管理）。
  * 核心内部在加锁保护下将对应槽位清空为 NULL，随后外部业务再次获取时将自动降维避让。
  */

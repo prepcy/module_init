@@ -14,19 +14,15 @@
 /**
  * 链接器特殊边界符号声明
  *
- * 当 GCC 在链接生成 ELF 时，GNU 链接器 (ld) 如果检测到有名为 "app_init_prioX_sec" 的段，
+ * 当 GCC 在链接生成 ELF 时，GNU 链接器 (ld) 如果检测到有名为 "app_init_sec" 的段，
  * 会在符号表中自动定义以下两个边界标记变量：
- *   - `__start_段名`：该物理内存段在 ELF 中的起始首地址。
- *   - `__stop_段名` ：该物理内存段在 ELF 中的终止尾地址。
+ *   - `__start_app_init_sec`：合并后的物理内存段起始首地址。
+ *   - `__stop_app_init_sec` ：合并后的物理内存段终止尾地址。
  *
- * 我们利用这组 `extern` 符号，实实现以操作“连续数组”的方式读取段内的函数指针。
+ * 我们利用这组 `extern` 符号，实现在 C 语言层面以操作“连续数组”的方式读取段内的元数据结构体。
  */
-extern initcall_t __start_app_init_prio1_sec[];
-extern initcall_t __stop_app_init_prio1_sec[];
-extern initcall_t __start_app_init_prio2_sec[];
-extern initcall_t __stop_app_init_prio2_sec[];
-extern initcall_t __start_app_init_prio3_sec[];
-extern initcall_t __stop_app_init_prio3_sec[];
+extern sys_initcall_t __start_app_init_sec[];
+extern sys_initcall_t __stop_app_init_sec[];
 
 /**
  * @brief 运行时操纵杆托管寄存器（对业务类型完全不感知的万能指针数组）
@@ -42,41 +38,56 @@ static pthread_mutex_t g_registry_mutex = PTHREAD_MUTEX_INITIALIZER;
 /**
  * @brief 时序依赖检测状态变量与历史请求记录表
  *
- * - `g_initcalls_running_level` 记录当前执行到的生命周期阶段 (1: prio1, 2: prio2, 3: prio3, 4: init已结束)
- * - `g_subsystem_requested_levels` 对应模块 ID 被首次请求时的运行层级。若请求时未注册，则在此记录级别。
+ * - `g_initcalls_running_level` 记录当前启动加载阶段 (1: 正在进行开机时序顺序初始化, 4: 启动加载已结束)
+ * - `g_subsystem_requested_levels` 记录每个模块是否在注册前就被越权提前请求过 (1: 是, 0: 否)
  */
 static volatile int g_initcalls_running_level = 0;
 static int g_subsystem_requested_levels[SYS_CORE_MAX_SLOTS] = { 0 };
 
-/**
- * @brief 遍历执行指定段范围内的所有有效初始化函数
- * @param start 该优先级物理段的起始指针
- * @param stop 该优先级物理段的结束指针
- */
-static void execute_prio_level(initcall_t *start, initcall_t *stop)
-{
-	initcall_t *call = start;
-	// 顺序遍历指针数组，直到抵达段的物理尾部边界
-	for (; call < stop; call++) {
-		if (*call) {
-			(*call)(); // 调用子系统自带的静默拉起程序
-		}
-	}
-}
-
 void do_initcalls(void)
 {
-	// 按严格的时序优先级 1 -> 2 -> 3 依次遍历并运行对应段函数，并实时标记执行层级
+	int count = __stop_app_init_sec - __start_app_init_sec;
+	if (count <= 0) {
+		return;
+	}
+
+	// 边界安全防护：防止编译的导出结构体总数超限
+	if (count > SYS_CORE_MAX_SLOTS) {
+		count = SYS_CORE_MAX_SLOTS;
+	}
+
+	// 将所有段中的初始化配置复制至栈上临时缓冲区中，进行就地排序
+	sys_initcall_t temp_calls[SYS_CORE_MAX_SLOTS];
+	int valid_count = 0;
+	for (int i = 0; i < count; i++) {
+		if (__start_app_init_sec[i].func) {
+			temp_calls[valid_count++] = __start_app_init_sec[i];
+		}
+	}
+
+	// 经典冒泡排序：按照 mod_id 升序进行排序
+	// 确保完全符合 app_modules.h 中枚举声明的从上到下的物理顺序
+	for (int i = 0; i < valid_count - 1; i++) {
+		for (int j = 0; j < valid_count - i - 1; j++) {
+			if (temp_calls[j].mod_id > temp_calls[j + 1].mod_id) {
+				sys_initcall_t temp = temp_calls[j];
+				temp_calls[j] = temp_calls[j + 1];
+				temp_calls[j + 1] = temp;
+			}
+		}
+	}
+
+	// 标记开机顺序初始化阶段启动
 	g_initcalls_running_level = 1;
-	execute_prio_level(__start_app_init_prio1_sec, __stop_app_init_prio1_sec);
 
-	g_initcalls_running_level = 2;
-	execute_prio_level(__start_app_init_prio2_sec, __stop_app_init_prio2_sec);
+	// 依次顺序执行各个模块自加载程序
+	for (int i = 0; i < valid_count; i++) {
+		if (temp_calls[i].func) {
+			temp_calls[i].func();
+		}
+	}
 
-	g_initcalls_running_level = 3;
-	execute_prio_level(__start_app_init_prio3_sec, __stop_app_init_prio3_sec);
-
-	// 所有初始化完成，标记进入主程序运转阶段 (Level 4)
+	// 初始化流程执行完毕，复位运行状态为 4
 	g_initcalls_running_level = 4;
 }
 
@@ -91,13 +102,13 @@ sys_err_t sys_subsystem_register(int mod_id, void *ops)
 	pthread_mutex_lock(&g_registry_mutex);
 
 	// 2. 时序依赖合理性动态校验
-	// 如果检测到该模块在此前较早的初始化优先级阶段已被其他模块请求过，则抛出时序依赖警告
+	// 如果检测到该模块在此前已被其他模块越权提前请求过，则抛出时序依赖警告
 	int req_lvl = g_subsystem_requested_levels[mod_id];
-	if (req_lvl != 0 && req_lvl < g_initcalls_running_level) {
+	if (req_lvl == 1 && g_initcalls_running_level == 1) {
 		fprintf(stderr,
 			"[Framework] WARNING: Timing dependency conflict detected! "
-			"Module ID %d was requested at Priority %d phase, but not registered until Priority %d phase!\n",
-			mod_id, req_lvl, g_initcalls_running_level);
+			"Module ID %d was requested before it was registered!\n",
+			mod_id);
 	}
 
 	// 3. 将业务虚函数表指针安全登记到指定的数字引脚槽位中
@@ -139,11 +150,9 @@ void *sys_subsystem_get(int mod_id)
 	void *ops = g_subsystem_registry[mod_id];
 
 	// 记录请求时机，辅助时序冲突分析
-	// 仅在开机顺序初始化期间 (g_initcalls_running_level < 4) 且获取目标为 NULL 时，记录首次被调用的优先级
-	if (ops == NULL && g_initcalls_running_level > 0 && g_initcalls_running_level < 4) {
-		if (g_subsystem_requested_levels[mod_id] == 0) {
-			g_subsystem_requested_levels[mod_id] = g_initcalls_running_level;
-		}
+	// 仅在开机顺序初始化期间 (g_initcalls_running_level == 1) 且获取目标为 NULL 时，记录该模块被提前请求
+	if (ops == NULL && g_initcalls_running_level == 1) {
+		g_subsystem_requested_levels[mod_id] = 1;
 	}
 	pthread_mutex_unlock(&g_registry_mutex);
 
@@ -154,24 +163,15 @@ void *sys_subsystem_get(int mod_id)
 /**
  * 占位初始化段弹射保护机制
  *
- * 原因：GNU 链接器的一个特性是，如果某个自定义段（如 app_init_prio1_sec）没有任何实体变量被强引用，
- * 该段便不会被保留，导致编译时报 `__start_app_init_prio1_sec` 符号未定义的链接错误（Undefined Reference）。
+ * 原因：GNU 链接器的一个特性是，如果某个自定义段（如 app_init_sec）没有任何实体变量被强引用，
+ * 该段便不会被保留，导致编译时报 `__start_app_init_sec` 符号未定义的链接错误（Undefined Reference）。
  *
- * 解决策略：我们在核心底层代码中，为 Priority 1、2、3 各导出一个极简的空实现 (dummy)。
- * 这样即使应用层裁剪了某一层级的所有业务模块，也能确保物理段始终存在，符号能安全解析。
+ * 解决策略：我们在核心底层代码中，强制定义一个占位变量放在最低的 ID（-1），并强行加入该段中，
+ * 确保该物理段绝对不为空。在执行初始化时，我们对其跳过执行。
  */
-static int dummy_prio1_init(void)
+static int dummy_prio_init(void)
 {
 	return 0;
 }
-static int dummy_prio2_init(void)
-{
-	return 0;
-}
-static int dummy_prio3_init(void)
-{
-	return 0;
-}
-APP_INIT_PRIO_1(dummy_prio1_init);
-APP_INIT_PRIO_2(dummy_prio2_init);
-APP_INIT_PRIO_3(dummy_prio3_init);
+static const sys_initcall_t __initcall_dummy_prio_init
+	__attribute__((used, section("app_init_sec"))) = { .func = dummy_prio_init, .mod_id = -1 };

@@ -13,14 +13,13 @@ static int imu_real_get_acceleration(float *x, float *y, float *z)
 }
 
 // 组装 IMU 操作集
-static const imu_ops_t my_real_imu_ops = {
-	.get_acceleration = imu_real_get_acceleration
-};
+static const imu_ops_t my_real_imu_ops = { .get_acceleration = imu_real_get_acceleration };
 
 static int imu_subsys_init(void)
 {
 	// 注册 IMU 接口
+	printf("[IMU驱动] 正在自加载过程...\n");
 	sys_subsystem_register(SYS_MOD_IMU, (void *)&my_real_imu_ops);
 	return 0;
 }
-APP_INIT_PRIO_2(imu_subsys_init);
+APP_INIT_REGISTER(imu_subsys_init, SYS_MOD_IMU); // 自动按序分级初始化

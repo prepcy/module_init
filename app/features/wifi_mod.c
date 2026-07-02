@@ -26,9 +26,10 @@ static const wifi_ops_t my_real_wifi_ops = { .connect = wifi_real_connect,
 
 static int wifi_subsys_init(void)
 {
+	printf("[WiFi驱动] 正在自加载过程...\n");
 	// 将自己独特的操纵杆登记到 WiFi 模块槽位
 	sys_subsystem_register(SYS_MOD_WIFI, (void *)&my_real_wifi_ops);
 
 	return 0;
 }
-APP_INIT_PRIO_2(wifi_subsys_init); // 自动分级初始化
+APP_INIT_REGISTER(wifi_subsys_init, SYS_MOD_WIFI); // 自动按序分级初始化
