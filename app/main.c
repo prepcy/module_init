@@ -66,5 +66,8 @@ int main(void)
 		printf("[Main业务] 提示：WiFi 模块已被卸载，自动跳过网络同步。\n");
 	}
 
+	printf("\n--- 系统开始注销并关机... ---\n");
+	do_exitcalls();
+
 	return 0;
 }

@@ -2,7 +2,7 @@
  * @file sys_core.c
  * @brief 机制总线核心实现文件
  *
- * 本文件实现了解耦总线的数据托管和分级自动启动拉起。
+ * 本文件实现了解耦总线的数据托管和开机关机时序管理。
  * 依靠 GCC Section 段和链接器符号机制，省去了手动的静态链表构建与注册，
  * 且不依赖任何外部自定义 Linker Script 链接脚本，移植性极强。
  */
@@ -91,6 +91,46 @@ void do_initcalls(void)
 	g_initcalls_running_level = 4;
 }
 
+void do_exitcalls(void)
+{
+	int count = __stop_app_init_sec - __start_app_init_sec;
+	if (count <= 0) {
+		return;
+	}
+
+	if (count > SYS_CORE_MAX_SLOTS) {
+		count = SYS_CORE_MAX_SLOTS;
+	}
+
+	// 将所有段中的自注册配置复制至栈上临时缓冲区中，进行降序排列
+	sys_initcall_t temp_calls[SYS_CORE_MAX_SLOTS];
+	int valid_count = 0;
+	for (int i = 0; i < count; i++) {
+		if (__start_app_init_sec[i].func) {
+			temp_calls[valid_count++] = __start_app_init_sec[i];
+		}
+	}
+
+	// 经典逆序冒泡排序：按照 mod_id 降序进行排序 (LIFO 原则)
+	// 保证后初始化的模块最先注销，保障系统注销时的资源依赖链安全
+	for (int i = 0; i < valid_count - 1; i++) {
+		for (int j = 0; j < valid_count - i - 1; j++) {
+			if (temp_calls[j].mod_id < temp_calls[j + 1].mod_id) {
+				sys_initcall_t temp = temp_calls[j];
+				temp_calls[j] = temp_calls[j + 1];
+				temp_calls[j + 1] = temp;
+			}
+		}
+	}
+
+	// 依次顺序执行各个已注册模块的注销释放程序
+	for (int i = 0; i < valid_count; i++) {
+		if (temp_calls[i].exit_func) {
+			temp_calls[i].exit_func();
+		}
+	}
+}
+
 sys_err_t sys_subsystem_register(int mod_id, void *ops)
 {
 	// 边界安全防御：防止模块注册越界或提交空指针
@@ -149,7 +189,7 @@ void *sys_subsystem_get(int mod_id)
 	pthread_mutex_lock(&g_registry_mutex);
 	void *ops = g_subsystem_registry[mod_id];
 
-	// 记录请求时机，辅助时序冲突分析
+	// 记录请求时机，辅助时序冲突 analysis
 	// 仅在开机顺序初始化期间 (g_initcalls_running_level == 1) 且获取目标为 NULL 时，记录该模块被提前请求
 	if (ops == NULL && g_initcalls_running_level == 1) {
 		g_subsystem_requested_levels[mod_id] = 1;
@@ -167,11 +207,10 @@ void *sys_subsystem_get(int mod_id)
  * 该段便不会被保留，导致编译时报 `__start_app_init_sec` 符号未定义的链接错误（Undefined Reference）。
  *
  * 解决策略：我们在核心底层代码中，强制定义一个占位变量放在最低的 ID（-1），并强行加入该段中，
- * 确保该物理段绝对不为空。在执行初始化时，我们对其跳过执行。
+ * 确保该物理段绝对不为空。在执行初始化与注销时，我们对其跳过执行。
  */
 static int dummy_prio_init(void)
 {
 	return 0;
 }
-static const sys_initcall_t __initcall_dummy_prio_init
-	__attribute__((used, section("app_init_sec"))) = { .func = dummy_prio_init, .mod_id = -1 };
+APP_REGISTER(dummy_prio_init, NULL, -1);

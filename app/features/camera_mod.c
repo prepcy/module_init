@@ -20,4 +20,10 @@ static int camera_subsys_init(void)
 	sys_subsystem_register(SYS_MOD_CAMERA, (void *)&my_real_cam_ops);
 	return 0;
 }
-APP_INIT_REGISTER(camera_subsys_init, SYS_MOD_CAMERA); // 自动按序分级初始化
+
+static void camera_subsys_exit(void)
+{
+	printf("[Camera驱动] 正在注销释放过程...\n");
+	sys_subsystem_unregister(SYS_MOD_CAMERA);
+}
+APP_REGISTER(camera_subsys_init, camera_subsys_exit, SYS_MOD_CAMERA); // 自动开机关机生命周期托管

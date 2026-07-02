@@ -34,40 +34,58 @@ typedef enum {
 typedef int (*initcall_t)(void);
 
 /**
- * @brief 初始化调用段元数据结构
- * 强绑定初始化函数与模块唯一 ID (枚举整数值)
+ * @brief 自动注销函数类型指针
+ * 所有需要注册到关机清理时序中的释放函数，均须符合 `void func(void)` 的函数原型
+ */
+typedef void (*exitcall_t)(void);
+
+/**
+ * @brief 初始化/注销调用段元数据结构
+ * 强绑定初始化/注销函数与模块唯一 ID (枚举整数值)
  */
 typedef struct {
 	initcall_t func;
+	exitcall_t exit_func;
 	int mod_id;
 } sys_initcall_t;
 
 /**
  * @brief 通用业务模块自注册宏
- * @param fn 模块的初始化启动函数名称
+ * @param init_fn 模块的初始化启动函数名称
+ * @param exit_fn 模块的注销释放函数名称 (若无则传入 NULL)
  * @param _mod_id_arg 模块对应的唯一整型 ID (如 SYS_MOD_WIFI 等枚举值)
  *
- * 利用 GCC 的 `__attribute__((used, section(...)))` 属性，将包含函数指针与模块 ID
+ * 利用 GCC 的 `__attribute__((used, section(...)))` 属性，将包含开机关机指针与模块 ID
  * 的元数据结构体直接放置到特殊的段 `"app_init_sec"` 中。
- * 运行时由框架层 do_initcalls 对其进行拷贝与排序，按枚举 ID 大小的物理顺序依次拉起。
+ * 运行时由框架层 do_initcalls 对其进行拷贝与排序，按枚举 ID 大小的物理顺序依次拉起；
+ * 在关机时由 do_exitcalls 逆序进行卸载清理动作。
  *
  * 注意：宏参数名特意使用 `_mod_id_arg` 而非 `mod_id`，以避免与结构体指定初始化式
  * `.mod_id = xxx` 中的字段名 `mod_id` 发生 C 预处理器的命名冲突展开错误。
  */
-#define APP_INIT_REGISTER(fn, _mod_id_arg) \
-	static const sys_initcall_t __initcall_##fn \
-	__attribute__((used, section("app_init_sec"))) = { \
-		.func = fn, \
+#define APP_REGISTER(init_fn, exit_fn, _mod_id_arg) \
+	static const sys_initcall_t __initcall_##init_fn \
+	__attribute__((used, section("app_init_sec"), aligned(8))) = { \
+		.func = init_fn, \
+		.exit_func = exit_fn, \
 		.mod_id = _mod_id_arg \
 	}
 
 /**
  * @brief 执行所有已导出段函数的遍历初始化
  *
- * 按照 Priority 1 -> 2 -> 3 的顺序，依次遍历相应内存段中的函数指针并同步调用。
+ * 按照模块 ID 升序依次调用段内函数。
  * 该函数在 `main` 启动初期最先被调用，为单线程同步执行。
  */
 void do_initcalls(void);
+
+/**
+ * @brief 执行所有已导出段函数的逆序注销释放
+ *
+ * 按照模块 ID 降序（LIFO 后进先出）依次调用段内非 NULL 的注销函数。
+ * 该函数在程序结束退出前被调用，完成资源优雅释放。
+ */
+void do_exitcalls(void);
 
 /* =========================================================================
  * 2. 运行时模块托管机制（使用通用 int 阻断依赖）
