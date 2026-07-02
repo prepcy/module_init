@@ -92,6 +92,16 @@ void do_initcalls(void);
 sys_err_t sys_subsystem_register(int mod_id, void *ops);
 
 /**
+ * @brief 注销指定模块的操纵杆
+ * @param mod_id 统一的业务引脚槽位 ID
+ * @return sys_err_t 注销结果状态码
+ * 
+ * 允许在运行阶段动态卸载/注销某个功能组件（配合设备动态热插拔与休眠断电等生命周期管理）。
+ * 核心内部在加锁保护下将对应槽位清空为 NULL，随后外部业务再次获取时将自动降维避让。
+ */
+sys_err_t sys_subsystem_unregister(int mod_id);
+
+/**
  * @brief 索要指定模块的操纵杆
  * @param mod_id 统一的业务引脚槽位 ID
  * @return void* 具体模块操作表指针的万能指针（若该模块被裁剪编译，则返回 `NULL`）

@@ -5,6 +5,7 @@
 
 static int wifi_real_connect(const char *ssid, const char *pwd)
 {
+	(void)pwd; // 抑制未使用参数警告
 	printf("[WiFi驱动] 正在连接路由器: %s ... 成功！\n", ssid);
 	return 0;
 }
@@ -27,6 +28,7 @@ static int wifi_subsys_init(void)
 {
 	// 将自己独特的操纵杆登记到 WiFi 模块槽位
 	sys_subsystem_register(SYS_MOD_WIFI, (void *)&my_real_wifi_ops);
+
 	return 0;
 }
 APP_INIT_PRIO_2(wifi_subsys_init); // 自动分级初始化

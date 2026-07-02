@@ -44,3 +44,8 @@ add_executable(${PROJECT_NAME}
 
 # 引入功能特性子目录进行编译源文件追加
 add_subdirectory(app/features)
+
+# 引入多线程库支持并进行链接保护
+find_package(Threads REQUIRED)
+target_link_libraries(${PROJECT_NAME} PRIVATE Threads::Threads)
+

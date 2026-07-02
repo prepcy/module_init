@@ -26,7 +26,26 @@ int main(void)
 	 */
 	sys_err_t cam_ret = camera_start_stream(30, 1920, 1080);
 	if (cam_ret != SYS_OK) {
-		printf("ℹ️  [Main业务] 提示：当前 Camera 模块未启用，跳过录像业务。\n");
+		printf("[Main业务] 提示：当前 Camera 模块未启用，跳过录像业务。\n");
+	}
+
+	/* =========================================================================
+	 * 场景三：动态注销与生命周期自愈验证 (模拟 WiFi 模块热拔出)
+	 * =========================================================================
+	 */
+	printf("\n--- 模拟运行时 WiFi 模块热拔出... ---\n");
+	sys_err_t unreg_ret = sys_subsystem_unregister(SYS_MOD_WIFI);
+	if (unreg_ret == SYS_OK) {
+		printf("[Main业务] WiFi 模块注销成功！\n");
+	}
+
+	printf("--- 再次尝试调用 WiFi 接口... ---\n");
+	wifi_ret = wifi_connect("Mcu_Work_Wifi", "12345678");
+	if (wifi_ret == SYS_OK) {
+		printf("[Main业务] 当前网络信号强度: %d dBm\n", wifi_get_rssi());
+	} else {
+		// 期待运行至此，表示注销后代理函数安全平滑降维，未崩溃
+		printf("[Main业务] 提示：WiFi 模块已被卸载，自动跳过网络同步。\n");
 	}
 
 	return 0;
