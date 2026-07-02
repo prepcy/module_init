@@ -12,7 +12,11 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # 开启常用警告标志
 add_compile_options(-Wall -Wextra)
 
-# 定义应用特性编译配置选项（默认启用 WiFi 和 Camera）
+# 引入 menuconfig 自动解析器
+include(tools/ParseConfig.cmake)
+load_dvr_build_config("${CMAKE_CURRENT_SOURCE_DIR}/.config")
+
+# 定义应用特性编译配置选项（如果存在 .config，其值会被 menuconfig 设置强制覆盖）
 option(CONFIG_ENABLE_WIFI "Enable WiFi Module" ON)
 option(CONFIG_ENABLE_CAMERA "Enable Camera Module" ON)
 option(CONFIG_ENABLE_GPS "Enable GPS Module" OFF)
@@ -34,6 +38,7 @@ endif()
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/core
     ${CMAKE_CURRENT_SOURCE_DIR}/app
+    ${CMAKE_BINARY_DIR}/include/generated
 )
 
 # 声明主执行程序，关联主入口及解耦的核心机制代码

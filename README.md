@@ -39,32 +39,27 @@
 
 ## 编译与运行指南
 
-本项目提供了便捷的 [build.sh](file:///home/loong/demo/module_init/build.sh) 一键编译脚本，并支持自动导出 IDE 符号跳转数据库。
+本项目提供了便捷的 [build.sh](file:///home/loong/demo/module_init/build.sh) 一键编译与配置脚本，并支持自动导出 IDE 符号跳转数据库。
 
-### 1. 查看编译帮助说明
+### 1. 开启图形化配置界面 (MenuConfig)
+运行以下命令可拉起终端配置菜单，按空格键可以启用或禁用子模块，配置完成后保存退出即可：
 ```bash
-./build.sh --help
+./build.sh menuconfig
 ```
 
-### 2. 默认全功能编译与运行
-直接运行脚本即可编译（默认自动启用 WiFi 和 Camera，并于根目录生成 `compile_commands.json` 软链接）：
+### 2. 默认增量编译与运行
+直接运行脚本即可完成编译构建，编译产物输出至 `output/` 文件夹下（根目录会自动生成 `compile_commands.json` 软链接以支持 IDE 跳转）：
 ```bash
 ./build.sh
-./build/app_core
+./output/app_core
 ```
 
-### 3. 模块选择性裁剪编译
-支持在命令行传参进行模块编译裁剪。例如，清空构建历史并禁用 WiFi 模块（仅编译 Camera 模块）：
-```bash
-./build.sh --clean --wifi off --camera on
-```
-运行后输出会自动切换为网络降维模式，不包含任何 WiFi 驱动的物理加载：
-```text
---- 应用层业务逻辑开始运转 ---
-
-[Main业务] 提示：当前 WiFi 模块未启用，跳过网络业务。
-[Camera驱动] 开启视频流成功！参数: 30 FPS, 分辨率: 1920x1080
-```
+### 3. 配置文件的导入与导出
+本系统支持通过命令进行配置的管理与重置：
+* **重置/导入默认配置**：`./build.sh load`
+* **导入指定备份配置**：`./build.sh load backup.config`
+* **保存/导出当前配置**：`./build.sh save [备份文件名]`
+* **清理历史构建缓存**：`./build.sh clean`
 
 ---
 

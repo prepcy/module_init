@@ -1,0 +1,24 @@
+# App-Core MenuConfig 配置内容
+# 说明：
+# 1. 当前 tools/menuconfig.py 支持 menu/config/bool/string/default/required
+# 2. 支持 choice/endchoice 互斥项
+# 3. 支持 depends on <CONFIG_ID> 依赖项
+# 4. 配置写入 .config
+
+menu "功能模块选择"
+    config ENABLE_WIFI
+        bool "启用 WiFi 模块 (ENABLE_WIFI)"
+        default y
+
+    config ENABLE_CAMERA
+        bool "启用 Camera 模块 (ENABLE_CAMERA)"
+        default y
+
+    config ENABLE_GPS
+        bool "启用 GPS 模块 (ENABLE_GPS)"
+        default n
+
+    config ENABLE_IMU
+        bool "启用 IMU 模块 (ENABLE_IMU)"
+        default n
+endmenu

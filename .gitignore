@@ -1,5 +1,5 @@
 # Build directory
-build/
+output/
 bin/
 
 # CMake generated files
@@ -35,3 +35,11 @@ app_core
 *.cache
 compile_commands.json
 .clang-format
+
+third_lib
+
+# Menuconfig output
+.config
+
+# Python bytecode cache
+__pycache__/
