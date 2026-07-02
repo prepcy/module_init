@@ -12,14 +12,14 @@
 #include <pthread.h>
 
 /**
- * 🌟 链接器特殊边界符号声明
+ * 链接器特殊边界符号声明
  *
  * 当 GCC 在链接生成 ELF 时，GNU 链接器 (ld) 如果检测到有名为 "app_init_prioX_sec" 的段，
  * 会在符号表中自动定义以下两个边界标记变量：
  *   - `__start_段名`：该物理内存段在 ELF 中的起始首地址。
  *   - `__stop_段名` ：该物理内存段在 ELF 中的终止尾地址。
  *
- * 我们利用这组 `extern` 符号，实现在 C 语言层面以操作“连续数组”的方式读取段内的函数指针。
+ * 我们利用这组 `extern` 符号，实实现以操作“连续数组”的方式读取段内的函数指针。
  */
 extern initcall_t __start_app_init_prio1_sec[];
 extern initcall_t __stop_app_init_prio1_sec[];
@@ -138,7 +138,7 @@ void *sys_subsystem_get(int mod_id)
 	pthread_mutex_lock(&g_registry_mutex);
 	void *ops = g_subsystem_registry[mod_id];
 
-	// 🌟 记录请求时机，辅助时序冲突分析
+	// 记录请求时机，辅助时序冲突分析
 	// 仅在开机顺序初始化期间 (g_initcalls_running_level < 4) 且获取目标为 NULL 时，记录首次被调用的优先级
 	if (ops == NULL && g_initcalls_running_level > 0 && g_initcalls_running_level < 4) {
 		if (g_subsystem_requested_levels[mod_id] == 0) {
@@ -152,7 +152,7 @@ void *sys_subsystem_get(int mod_id)
 }
 
 /**
- * 🌟 占位初始化段弹射保护机制
+ * 占位初始化段弹射保护机制
  *
  * 原因：GNU 链接器的一个特性是，如果某个自定义段（如 app_init_prio1_sec）没有任何实体变量被强引用，
  * 该段便不会被保留，导致编译时报 `__start_app_init_prio1_sec` 符号未定义的链接错误（Undefined Reference）。

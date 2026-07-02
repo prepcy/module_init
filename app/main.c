@@ -1,6 +1,8 @@
+#include <stdio.h>
 #include "wifi_mod.h"
 #include "camera_mod.h"
-#include <stdio.h>
+#include "gps_mod.h"
+#include "imu_mod.h"
 
 int main(void)
 {
@@ -17,7 +19,7 @@ int main(void)
 	if (wifi_ret == SYS_OK) {
 		printf("[Main业务] 当前网络信号强度: %d dBm\n", wifi_get_rssi());
 	} else {
-		printf("ℹ️  [Main业务] 提示：当前 WiFi 模块未启用，跳过网络业务。\n");
+		printf("[Main业务] 提示：当前 WiFi 模块未启用，跳过网络业务。\n");
 	}
 
 	/* =========================================================================
@@ -30,7 +32,23 @@ int main(void)
 	}
 
 	/* =========================================================================
-	 * 场景三：动态注销与生命周期自愈验证 (模拟 WiFi 模块热拔出)
+	 * 场景三：动态调用 GPS 和 IMU 模块
+	 * =========================================================================
+	 */
+	double lat = 0.0, lng = 0.0;
+	sys_err_t gps_ret = gps_get_coordinates(&lat, &lng);
+	if (gps_ret != SYS_OK) {
+		printf("[Main业务] 提示：当前 GPS 模块未启用，跳过定位业务。\n");
+	}
+
+	float ax = 0.0f, ay = 0.0f, az = 0.0f;
+	sys_err_t imu_ret = imu_get_acceleration(&ax, &ay, &az);
+	if (imu_ret != SYS_OK) {
+		printf("[Main业务] 提示：当前 IMU 模块未启用，跳过惯导业务。\n");
+	}
+
+	/* =========================================================================
+	 * 场景四：动态注销与生命周期自愈验证 (模拟 WiFi 模块热拔出)
 	 * =========================================================================
 	 */
 	printf("\n--- 模拟运行时 WiFi 模块热拔出... ---\n");

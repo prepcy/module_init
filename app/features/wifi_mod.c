@@ -19,7 +19,7 @@ static void wifi_real_disconnect(void)
 	printf("[WiFi驱动] 已断开连接。\n");
 }
 
-// 🌟 组装专属的奇葩操作集
+// 组装专属的操作集
 static const wifi_ops_t my_real_wifi_ops = { .connect = wifi_real_connect,
 					     .get_rssi = wifi_real_get_rssi,
 					     .disconnect = wifi_real_disconnect };

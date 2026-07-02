@@ -13,10 +13,10 @@ if(CONFIG_ENABLE_CAMERA)
 endif()
 
 if(CONFIG_ENABLE_GPS)
-    target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gps_module.c)
+    target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/gps_mod.c)
 endif()
 
 if(CONFIG_ENABLE_IMU)
-    target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/imu_module.c)
+    target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/imu_mod.c)
 endif()
 

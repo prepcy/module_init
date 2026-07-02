@@ -86,7 +86,7 @@ done
 
 # 如果指定了 --clean，删除原构建目录及根目录的链接文件
 if [ "$CLEAN_BUILD" = true ]; then
-    echo "🧹 正在清理历史构建产物..."
+    echo "[CLEAN] 正在清理历史构建产物..."
     rm -rf "${BUILD_DIR}"
     rm -f "${SCRIPT_DIR}/compile_commands.json"
 fi
@@ -96,7 +96,7 @@ mkdir -p "${BUILD_DIR}"
 cd "${BUILD_DIR}"
 
 echo "============================================="
-echo "⚙️  配置 CMake 编译参数:"
+echo "[CONFIG] 配置 CMake 编译参数:"
 echo "   - CONFIG_ENABLE_WIFI   = ${ENABLE_WIFI}"
 echo "   - CONFIG_ENABLE_CAMERA = ${ENABLE_CAMERA}"
 echo "   - CONFIG_ENABLE_GPS    = ${ENABLE_GPS}"
@@ -113,16 +113,16 @@ cmake \
     "${SCRIPT_DIR}"
 
 # 执行多线程编译
-echo "🔨 正在编译源文件..."
+echo "[BUILD] 正在编译源文件..."
 make -j$(nproc 2>/dev/null || echo 4)
 
 # 创建 compile_commands.json 软链接到项目根目录，供 clangd / VS Code 用于 IDE 补全与跳转
 if [ -f "compile_commands.json" ]; then
     ln -sf "${BUILD_DIR}/compile_commands.json" "${SCRIPT_DIR}/compile_commands.json"
-    echo "🔗 已建立 compile_commands.json 到项目根目录的软链接。"
+    echo "[LINK] 已建立 compile_commands.json 到项目根目录的软链接。"
 fi
 
 echo "============================================="
-echo "🎉 编译完成！可直接运行以下命令执行程序："
+echo "[SUCCESS] 编译完成！可直接运行以下命令执行程序："
 echo "   ./build/app_core"
 echo "============================================="
