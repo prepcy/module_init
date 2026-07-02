@@ -47,7 +47,7 @@ typedef struct {
 	initcall_t func;
 	exitcall_t exit_func;
 	int mod_id;
-} sys_initcall_t;
+} __attribute__((aligned(8))) sys_initcall_t;
 
 /**
  * @brief 通用业务模块自注册宏
@@ -63,13 +63,10 @@ typedef struct {
  * 注意：宏参数名特意使用 `_mod_id_arg` 而非 `mod_id`，以避免与结构体指定初始化式
  * `.mod_id = xxx` 中的字段名 `mod_id` 发生 C 预处理器的命名冲突展开错误。
  */
-#define APP_REGISTER(init_fn, exit_fn, _mod_id_arg) \
-	static const sys_initcall_t __initcall_##init_fn \
-	__attribute__((used, section("app_init_sec"), aligned(8))) = { \
-		.func = init_fn, \
-		.exit_func = exit_fn, \
-		.mod_id = _mod_id_arg \
-	}
+#define APP_REGISTER(init_fn, exit_fn, _mod_id_arg)                                                                    \
+	static const sys_initcall_t __initcall_##init_fn                                                               \
+		__attribute__((used, section("app_init_sec"),                                                          \
+			       aligned(8))) = { .func = init_fn, .exit_func = exit_fn, .mod_id = _mod_id_arg }
 
 /**
  * @brief 执行所有已导出段函数的遍历初始化
