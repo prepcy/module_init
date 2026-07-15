@@ -20,3 +20,7 @@ if(CONFIG_ENABLE_IMU)
     target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/imu_mod.c)
 endif()
 
+if(CONFIG_ENABLE_ZLMEDIA)
+    target_sources(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/zlmedia_mod.c)
+endif()
+

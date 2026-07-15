@@ -1,8 +1,10 @@
 #include <stdio.h>
+#include <unistd.h>
 #include "wifi_mod.h"
 #include "camera_mod.h"
 #include "gps_mod.h"
 #include "imu_mod.h"
+#include "zlmedia_mod.h"
 
 int main(void)
 {
@@ -65,6 +67,28 @@ int main(void)
 		// 期待运行至此，表示注销后代理函数安全平滑降维，未崩溃
 		printf("[Main业务] 提示：WiFi 模块已被卸载，自动跳过网络同步。\n");
 	}
+
+	/* =========================================================================
+	 * 场景五：模块间零拷贝高吞吐数据通道与 ioctl 控制验证 (Camera -> ZLMedia)
+	 * =========================================================================
+	 */
+	printf("\n--- 启动模块间通信测试：Camera 开启采集，ZLMedia 消费流数据 ---\n");
+	// 1. 通过统一 VFS ioctl 接口开启 Camera 视频流
+	camera_start_streaming();
+
+	// 2. 模拟运行 1.5 秒，观察拉流与帧消费情况 (Zero-copy payload print)
+	usleep(1500000);
+
+	// 3. 通过 ioctl 动态调整 ZLMedia 监听端口 (控制面解耦测试)
+	int new_port = 8555;
+	sys_subsystem_ioctl(SYS_MOD_ZLMEDIA, CMD_ZLM_SET_PORT, &new_port);
+
+	// 4. 继续运行 1 秒
+	usleep(1000000);
+
+	// 5. 停止 Camera 视频流
+	camera_stop_streaming();
+	usleep(500000); // 等待收尾打印完成
 
 	printf("\n--- 系统开始注销并关机... ---\n");
 	do_exitcalls();

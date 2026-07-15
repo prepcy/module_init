@@ -4,6 +4,9 @@
 #include "sys_core.h"
 #include "app_modules.h"
 
+#define CMD_CAM_START_STREAM     2001
+#define CMD_CAM_STOP_STREAM      2002
+
 typedef struct {
 	int (*start_stream)(int fps, int resolution_width, int resolution_height);
 	void *(*get_frame_buffer)(void);
@@ -13,31 +16,28 @@ typedef struct {
 // 统一安全代理 API (内联展开，零开销防御段错误)
 static inline sys_err_t camera_start_stream(int fps, int resolution_width, int resolution_height)
 {
-	camera_ops_t *ops = (camera_ops_t *)sys_subsystem_get(SYS_MOD_CAMERA);
-	if (!ops) {
-		return SYS_ERR_NOT_FOUND;
-	}
-	if (!ops->start_stream) {
-		return SYS_ERR_NOT_SUPPORTED;
-	}
-	return ops->start_stream(fps, resolution_width, resolution_height);
+	(void)fps; (void)resolution_width; (void)resolution_height;
+	return sys_subsystem_ioctl(SYS_MOD_CAMERA, CMD_CAM_START_STREAM, NULL);
 }
 
 static inline void *camera_get_frame_buffer(void)
 {
-	camera_ops_t *ops = (camera_ops_t *)sys_subsystem_get(SYS_MOD_CAMERA);
-	if (ops && ops->get_frame_buffer) {
-		return ops->get_frame_buffer();
-	}
-	return NULL; // 模块未加载或接口为空
+	return NULL;
 }
 
 static inline void camera_stop_stream(void)
 {
-	camera_ops_t *ops = (camera_ops_t *)sys_subsystem_get(SYS_MOD_CAMERA);
-	if (ops && ops->stop_stream) {
-		ops->stop_stream();
-	}
+	sys_subsystem_ioctl(SYS_MOD_CAMERA, CMD_CAM_STOP_STREAM, NULL);
+}
+
+static inline sys_err_t camera_start_streaming(void)
+{
+	return sys_subsystem_ioctl(SYS_MOD_CAMERA, CMD_CAM_START_STREAM, NULL);
+}
+
+static inline sys_err_t camera_stop_streaming(void)
+{
+	return sys_subsystem_ioctl(SYS_MOD_CAMERA, CMD_CAM_STOP_STREAM, NULL);
 }
 
 #endif // CAMERA_MOD_H

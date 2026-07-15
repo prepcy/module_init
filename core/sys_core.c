@@ -200,6 +200,287 @@ void *sys_subsystem_get(int mod_id)
 	return ops;
 }
 
+#include <stdlib.h>
+#include <sys/time.h>
+
+/* =========================================================================
+ * 3. 零拷贝数据通道机制 (Zero-Copy Ring Buffer & Buffer Pool)
+ * ========================================================================= */
+
+sys_buffer_t *sys_buffer_get_free(sys_buffer_t *pool, int pool_size)
+{
+	if (!pool) return NULL;
+	for (int i = 0; i < pool_size; i++) {
+		if (pool[i].ref_count == 0) {
+			if (__sync_bool_compare_and_swap(&pool[i].ref_count, 0, 1)) {
+				pool[i].length = 0;
+				pool[i].timestamp = 0;
+				return &pool[i];
+			}
+		}
+	}
+	return NULL;
+}
+
+void sys_buffer_ref(sys_buffer_t *buf)
+{
+	if (buf) {
+		__sync_add_and_fetch(&buf->ref_count, 1);
+	}
+}
+
+void sys_buffer_unref(sys_buffer_t *buf)
+{
+	if (buf) {
+		__sync_sub_and_fetch(&buf->ref_count, 1);
+	}
+}
+
+sys_ringbuf_t *sys_ringbuf_create(unsigned int size)
+{
+	unsigned int real_size = 1;
+	while (real_size < size) {
+		real_size <<= 1;
+	}
+
+	sys_ringbuf_t *rb = (sys_ringbuf_t *)malloc(sizeof(sys_ringbuf_t));
+	if (!rb) return NULL;
+
+	rb->buffers = (sys_buffer_t **)calloc(real_size, sizeof(sys_buffer_t *));
+	if (!rb->buffers) {
+		free(rb);
+		return NULL;
+	}
+
+	rb->size = real_size;
+	rb->in = 0;
+	rb->out = 0;
+	pthread_mutex_init(&rb->lock, NULL);
+	pthread_cond_init(&rb->cond, NULL);
+	return rb;
+}
+
+void sys_ringbuf_destroy(sys_ringbuf_t *rb)
+{
+	if (!rb) return;
+	pthread_mutex_destroy(&rb->lock);
+	pthread_cond_destroy(&rb->cond);
+	unsigned int count = rb->in - rb->out;
+	for (unsigned int i = 0; i < count; i++) {
+		sys_buffer_t *buf = rb->buffers[(rb->out + i) & (rb->size - 1)];
+		sys_buffer_unref(buf);
+	}
+	free(rb->buffers);
+	free(rb);
+}
+
+sys_err_t sys_ringbuf_put(sys_ringbuf_t *rb, sys_buffer_t *buf)
+{
+	if (!rb || !buf) return SYS_ERR_INVALID_PARAM;
+
+	pthread_mutex_lock(&rb->lock);
+	if (rb->in - rb->out >= rb->size) {
+		pthread_mutex_unlock(&rb->lock);
+		return SYS_ERR_GENERIC;
+	}
+
+	sys_buffer_ref(buf);
+	rb->buffers[rb->in & (rb->size - 1)] = buf;
+	rb->in++;
+
+	pthread_cond_signal(&rb->cond);
+	pthread_mutex_unlock(&rb->lock);
+	return SYS_OK;
+}
+
+sys_buffer_t *sys_ringbuf_get(sys_ringbuf_t *rb, int timeout_ms)
+{
+	if (!rb) return NULL;
+
+	pthread_mutex_lock(&rb->lock);
+	if (rb->in == rb->out) {
+		if (timeout_ms < 0) {
+			while (rb->in == rb->out) {
+				pthread_cond_wait(&rb->cond, &rb->lock);
+			}
+		} else if (timeout_ms > 0) {
+			struct timeval now;
+			gettimeofday(&now, NULL);
+			struct timespec ts;
+			ts.tv_sec = now.tv_sec + (timeout_ms / 1000);
+			ts.tv_nsec = (now.tv_usec * 1000) + ((timeout_ms % 1000) * 1000000);
+			if (ts.tv_nsec >= 1000000000) {
+				ts.tv_sec += 1;
+				ts.tv_nsec -= 1000000000;
+			}
+			while (rb->in == rb->out) {
+				int ret = pthread_cond_timedwait(&rb->cond, &rb->lock, &ts);
+				if (ret != 0) {
+					break;
+				}
+			}
+		}
+	}
+
+	if (rb->in == rb->out) {
+		pthread_mutex_unlock(&rb->lock);
+		return NULL;
+	}
+
+	sys_buffer_t *buf = rb->buffers[rb->out & (rb->size - 1)];
+	rb->out++;
+	pthread_mutex_unlock(&rb->lock);
+	return buf;
+}
+
+unsigned int sys_ringbuf_count(sys_ringbuf_t *rb)
+{
+	if (!rb) return 0;
+	pthread_mutex_lock(&rb->lock);
+	unsigned int count = rb->in - rb->out;
+	pthread_mutex_unlock(&rb->lock);
+	return count;
+}
+
+/* =========================================================================
+ * 4. 异步发布-订阅事件总线 (Pub/Sub Event Bus)
+ * ========================================================================= */
+
+#define MAX_SUBSCRIBERS 16
+#define MAX_EVENTS 32
+
+typedef struct {
+	event_cb_t callback;
+	void *priv_data;
+} sys_subscriber_t;
+
+typedef struct {
+	int event_id;
+	sys_subscriber_t subscribers[MAX_SUBSCRIBERS];
+	int subscriber_count;
+} sys_event_entry_t;
+
+static sys_event_entry_t g_event_bus[MAX_EVENTS];
+static int g_event_entry_count = 0;
+static pthread_mutex_t g_event_bus_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+sys_err_t sys_event_subscribe(int event_id, event_cb_t callback, void *priv_data)
+{
+	if (!callback) return SYS_ERR_INVALID_PARAM;
+
+	pthread_mutex_lock(&g_event_bus_mutex);
+	sys_event_entry_t *entry = NULL;
+	for (int i = 0; i < g_event_entry_count; i++) {
+		if (g_event_bus[i].event_id == event_id) {
+			entry = &g_event_bus[i];
+			break;
+		}
+	}
+
+	if (!entry) {
+		if (g_event_entry_count >= MAX_EVENTS) {
+			pthread_mutex_unlock(&g_event_bus_mutex);
+			return SYS_ERR_GENERIC;
+		}
+		entry = &g_event_bus[g_event_entry_count++];
+		entry->event_id = event_id;
+		entry->subscriber_count = 0;
+	}
+
+	for (int i = 0; i < entry->subscriber_count; i++) {
+		if (entry->subscribers[i].callback == callback) {
+			pthread_mutex_unlock(&g_event_bus_mutex);
+			return SYS_OK;
+		}
+	}
+
+	if (entry->subscriber_count >= MAX_SUBSCRIBERS) {
+		pthread_mutex_unlock(&g_event_bus_mutex);
+		return SYS_ERR_GENERIC;
+	}
+
+	entry->subscribers[entry->subscriber_count].callback = callback;
+	entry->subscribers[entry->subscriber_count].priv_data = priv_data;
+	entry->subscriber_count++;
+
+	pthread_mutex_unlock(&g_event_bus_mutex);
+	return SYS_OK;
+}
+
+sys_err_t sys_event_unsubscribe(int event_id, event_cb_t callback)
+{
+	if (!callback) return SYS_ERR_INVALID_PARAM;
+
+	pthread_mutex_lock(&g_event_bus_mutex);
+	for (int i = 0; i < g_event_entry_count; i++) {
+		if (g_event_bus[i].event_id == event_id) {
+			sys_event_entry_t *entry = &g_event_bus[i];
+			for (int j = 0; j < entry->subscriber_count; j++) {
+				if (entry->subscribers[j].callback == callback) {
+					for (int k = j; k < entry->subscriber_count - 1; k++) {
+						entry->subscribers[k] = entry->subscribers[k+1];
+					}
+					entry->subscriber_count--;
+					pthread_mutex_unlock(&g_event_bus_mutex);
+					return SYS_OK;
+				}
+			}
+		}
+	}
+
+	pthread_mutex_unlock(&g_event_bus_mutex);
+	return SYS_ERR_NOT_FOUND;
+}
+
+sys_err_t sys_event_publish(int event_id, const void *param, size_t param_len)
+{
+	pthread_mutex_lock(&g_event_bus_mutex);
+	sys_event_entry_t *entry = NULL;
+	for (int i = 0; i < g_event_entry_count; i++) {
+		if (g_event_bus[i].event_id == event_id) {
+			entry = &g_event_bus[i];
+			break;
+		}
+	}
+
+	if (!entry || entry->subscriber_count == 0) {
+		pthread_mutex_unlock(&g_event_bus_mutex);
+		return SYS_OK;
+	}
+
+	int sub_count = entry->subscriber_count;
+	sys_subscriber_t subs_copy[MAX_SUBSCRIBERS];
+	for (int i = 0; i < sub_count; i++) {
+		subs_copy[i] = entry->subscribers[i];
+	}
+	pthread_mutex_unlock(&g_event_bus_mutex);
+
+	sys_event_t event;
+	event.event_id = event_id;
+	event.param = (void *)param;
+	event.param_len = param_len;
+
+	for (int i = 0; i < sub_count; i++) {
+		if (subs_copy[i].callback) {
+			subs_copy[i].callback(&event, subs_copy[i].priv_data);
+		}
+	}
+	return SYS_OK;
+}
+
+/* =========================================================================
+ * 5. 统一字符设备接口 (Char Dev / ioctl Style)
+ * ========================================================================= */
+
+sys_err_t sys_subsystem_ioctl(int mod_id, unsigned int cmd, void *arg)
+{
+	sys_dev_ops_t *ops = (sys_dev_ops_t *)sys_subsystem_get(mod_id);
+	if (!ops || !ops->ioctl) {
+		return SYS_ERR_NOT_SUPPORTED;
+	}
+	return ops->ioctl(cmd, arg) == 0 ? SYS_OK : SYS_ERR_GENERIC;
+}
+
 /**
  * 占位初始化段弹射保护机制
  *

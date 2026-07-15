@@ -13,6 +13,7 @@ typedef enum {
 	SYS_MOD_GPS,
 	SYS_MOD_IMU,
 	SYS_MOD_CAMERA,
+	SYS_MOD_ZLMEDIA,
 	// 未来你可以随意在这里加内容：
 	// SYS_MOD_4G,
 	// SYS_MOD_BLUETOOTH,

@@ -21,6 +21,7 @@ option(CONFIG_ENABLE_WIFI "Enable WiFi Module" ON)
 option(CONFIG_ENABLE_CAMERA "Enable Camera Module" ON)
 option(CONFIG_ENABLE_GPS "Enable GPS Module" OFF)
 option(CONFIG_ENABLE_IMU "Enable IMU Module" OFF)
+option(CONFIG_ENABLE_ZLMEDIA "Enable ZLMedia Module" ON)
 
 # 在 Release 模式下开启链接期优化（LTO），优化函数指针间接调用的开销
 if(CMAKE_BUILD_TYPE STREQUAL "Release")

@@ -11,6 +11,7 @@
 #define SYS_CORE_H
 
 #include <stddef.h>
+#include <pthread.h>
 
 /* =========================================================================
  * 框架级错误码枚举定义
@@ -121,5 +122,86 @@ sys_err_t sys_subsystem_unregister(int mod_id);
  * 对应的业务虚表指针，并通过检查是否为 `NULL` 来决定是否平滑执行还是降维挂起。
  */
 void *sys_subsystem_get(int mod_id);
+
+/* =========================================================================
+ * 3. 零拷贝数据通道机制 (Zero-Copy Ring Buffer & Buffer Pool)
+ * ========================================================================= */
+
+/**
+ * @brief 单帧/单块共享缓存描述符
+ */
+typedef struct {
+	void *payload;          // 实际物理内存首地址
+	size_t length;          // 有效数据长度
+	size_t capacity;        // 缓冲区物理容量
+	unsigned long timestamp;// 时间戳 (微秒)
+	unsigned int frame_seq; // 帧序列号
+	int ref_count;          // 引用计数
+} sys_buffer_t;
+
+/**
+ * @brief 环形共享队列 (单读单写或多读多写 SPSC/MPMC RingBuffer)
+ */
+typedef struct {
+	sys_buffer_t **buffers; // 缓冲区描述符指针数组
+	unsigned int size;      // 队列深度 (必须为 2 的幂)
+	unsigned int in;        // 写指针
+	unsigned int out;       // 读指针
+	pthread_mutex_t lock;   // 互斥锁
+	pthread_cond_t cond;    // 消费者条件变量
+} sys_ringbuf_t;
+
+// Buffer pool & RingBuffer API
+sys_buffer_t *sys_buffer_get_free(sys_buffer_t *pool, int pool_size);
+void sys_buffer_ref(sys_buffer_t *buf);
+void sys_buffer_unref(sys_buffer_t *buf);
+
+sys_ringbuf_t *sys_ringbuf_create(unsigned int size);
+void sys_ringbuf_destroy(sys_ringbuf_t *rb);
+sys_err_t sys_ringbuf_put(sys_ringbuf_t *rb, sys_buffer_t *buf);
+sys_buffer_t *sys_ringbuf_get(sys_ringbuf_t *rb, int timeout_ms);
+unsigned int sys_ringbuf_count(sys_ringbuf_t *rb);
+
+/* =========================================================================
+ * 4. 异步发布-订阅事件总线 (Pub/Sub Event Bus)
+ * ========================================================================= */
+
+// 系统及业务事件 ID 定义
+#define EVENT_SYS_READY          100
+#define EVENT_SYS_SHUTDOWN       101
+#define EVENT_CAM_STREAM_START   200
+#define EVENT_CAM_STREAM_STOP    201
+#define EVENT_WIFI_CONNECTED     300
+#define EVENT_WIFI_DISCONNECTED  301
+
+typedef struct {
+	int event_id;       // 事件类型 (如 EVENT_CAM_STREAM_START 等)
+	void *param;        // 携带的事件参数指针
+	size_t param_len;   // 参数长度
+} sys_event_t;
+
+// 事件订阅回调函数类型
+typedef void (*event_cb_t)(const sys_event_t *event, void *priv_data);
+
+sys_err_t sys_event_subscribe(int event_id, event_cb_t callback, void *priv_data);
+sys_err_t sys_event_unsubscribe(int event_id, event_cb_t callback);
+sys_err_t sys_event_publish(int event_id, const void *param, size_t param_len);
+
+/* =========================================================================
+ * 5. 统一字符设备接口 (Char Dev / ioctl Style)
+ * ========================================================================= */
+
+/**
+ * @brief 虚拟字符设备操作表
+ */
+typedef struct {
+	int (*open)(void);
+	int (*close)(void);
+	int (*read)(void *buf, size_t count);
+	int (*write)(const void *buf, size_t count);
+	int (*ioctl)(unsigned int cmd, void *arg);
+} sys_dev_ops_t;
+
+sys_err_t sys_subsystem_ioctl(int mod_id, unsigned int cmd, void *arg);
 
 #endif // SYS_CORE_H
