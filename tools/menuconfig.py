@@ -315,6 +315,8 @@ def save_config():
             f.write("# 自动生成的产品配置文件\n\n")
             for opt in options:
                 if not is_dependency_met(opt):
+                    if opt["type"] != "string":
+                        f.write(f'# CONFIG_{opt["id"]} is not set\n')
                     continue
 
                 if opt["type"] == "string":

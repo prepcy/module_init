@@ -1,0 +1,7 @@
+Checks: >
+  clang-analyzer-*,
+  bugprone-*,
+  performance-*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+WarningsAsErrors: '*'
+HeaderFilterRegex: '^(core|app|tests)/.*'

@@ -1,41 +1,50 @@
-#include "wifi_mod.h"
-#include "sys_core.h"
-#include "app_modules.h"
+/**
+ * @file wifi_mod.c
+ * @brief WiFi 模块示例实现。
+ */
+
 #include <stdio.h>
 
-static int wifi_real_connect(const char *ssid, const char *pwd)
+#include "wifi_mod.h"
+
+static sys_err_t wifi_real_connect(const char *ssid, const char *password)
 {
-	(void)pwd; // 抑制未使用参数警告
-	printf("[WiFi驱动] 正在连接路由器: %s ... 成功！\n", ssid);
-	return 0;
+	(void)password;
+	printf("[WiFi] connected to %s\n", ssid);
+	return SYS_OK;
 }
 
-static int wifi_real_get_rssi(void)
+static sys_err_t wifi_real_get_rssi(int *out_rssi)
 {
-	return -45;
-}
-static void wifi_real_disconnect(void)
-{
-	printf("[WiFi驱动] 已断开连接。\n");
+	*out_rssi = -45;
+	return SYS_OK;
 }
 
-// 组装专属的操作集
-static const wifi_ops_t my_real_wifi_ops = { .connect = wifi_real_connect,
-					     .get_rssi = wifi_real_get_rssi,
-					     .disconnect = wifi_real_disconnect };
-
-static int wifi_subsys_init(void)
+static sys_err_t wifi_real_disconnect(void)
 {
-	printf("[WiFi驱动] 正在自加载过程...\n");
-	// 将自己独特的操纵杆登记到 WiFi 模块槽位
-	sys_subsystem_register(SYS_MOD_WIFI, (void *)&my_real_wifi_ops);
-
-	return 0;
+	printf("[WiFi] disconnected\n");
+	return SYS_OK;
 }
 
-static void wifi_subsys_exit(void)
+static const wifi_ops_t g_wifi_ops = {
+	.connect = wifi_real_connect, .get_rssi = wifi_real_get_rssi, .disconnect = wifi_real_disconnect};
+
+static sys_err_t wifi_init(void)
 {
-	printf("[WiFi驱动] 正在注销释放过程...\n");
-	sys_subsystem_unregister(SYS_MOD_WIFI);
+	const sys_service_desc_t service = {.module_id = SYS_MOD_WIFI,
+					    .interface_id = WIFI_INTERFACE_CONTROL,
+					    .abi_version = WIFI_ABI_VERSION,
+					    .ops_size = sizeof(g_wifi_ops),
+					    .ops = &g_wifi_ops,
+					    .name = "wifi.control"};
+
+	return sys_service_register(&service);
 }
-APP_REGISTER(wifi_subsys_init, wifi_subsys_exit, SYS_MOD_WIFI); // 自动开机关机生命周期托管
+
+static void wifi_exit(void)
+{
+	(void)sys_service_unregister(SYS_MOD_WIFI, WIFI_INTERFACE_CONTROL);
+}
+
+SYS_COMPONENT_REGISTER(g_wifi_component, SYS_MOD_WIFI, "wifi", SYS_COMPONENT_PHASE_SERVICE, NULL, 0U, wifi_init,
+		       wifi_exit);

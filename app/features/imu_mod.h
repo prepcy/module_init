@@ -1,28 +1,38 @@
+/**
+ * @file imu_mod.h
+ * @brief IMU 模块类型化控制接口。
+ */
+
 #ifndef IMU_MOD_H
 #define IMU_MOD_H
 
-#include "sys_core.h"
 #include "app_modules.h"
+#include "sys_core.h"
 
-// IMU 专属操作虚表
+#define IMU_INTERFACE_CONTROL 1U
+#define IMU_ABI_VERSION 1U
+
 typedef struct {
-	int (*get_acceleration)(float *x, float *y, float *z);
+	sys_err_t (*get_acceleration)(float *x, float *y, float *z);
 } imu_ops_t;
 
-// 统一安全代理 API (内联展开，零开销防御段错误)
+/** @brief 获取三轴加速度。 */
 static inline sys_err_t imu_get_acceleration(float *x, float *y, float *z)
 {
-	imu_ops_t *ops = (imu_ops_t *)sys_subsystem_get_lock(SYS_MOD_IMU);
-	if (!ops) {
-		return SYS_ERR_NOT_FOUND;
+	sys_service_ref_t ref;
+	sys_err_t ret;
+
+	if (x == NULL || y == NULL || z == NULL) {
+		return SYS_ERR_INVALID_PARAM;
 	}
-	if (!ops->get_acceleration) {
-		sys_subsystem_put_lock(SYS_MOD_IMU);
-		return SYS_ERR_NOT_SUPPORTED;
+	ret = sys_service_acquire(SYS_MOD_IMU, IMU_INTERFACE_CONTROL, IMU_ABI_VERSION, sizeof(imu_ops_t), &ref);
+	if (ret != SYS_OK) {
+		return ret;
 	}
-	int ret = ops->get_acceleration(x, y, z);
-	sys_subsystem_put_lock(SYS_MOD_IMU);
+	const imu_ops_t *ops = ref.ops;
+	ret = ops->get_acceleration == NULL ? SYS_ERR_NOT_SUPPORTED : ops->get_acceleration(x, y, z);
+	sys_service_release(&ref);
 	return ret;
 }
 
-#endif // IMU_MOD_H
+#endif

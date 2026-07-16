@@ -1,58 +1,75 @@
+/**
+ * @file wifi_mod.h
+ * @brief WiFi 模块类型化控制接口。
+ */
+
 #ifndef WIFI_MOD_H
 #define WIFI_MOD_H
 
-#include "sys_core.h"
 #include "app_modules.h"
+#include "sys_core.h"
 
-// WiFi 专有的特殊结构体
+#define WIFI_INTERFACE_CONTROL 1U
+#define WIFI_ABI_VERSION 1U
+
 typedef struct {
-	int (*connect)(const char *ssid, const char *pwd);
-	int (*get_rssi)(void);
-	void (*disconnect)(void);
+	sys_err_t (*connect)(const char *ssid, const char *password);
+	sys_err_t (*get_rssi)(int *out_rssi);
+	sys_err_t (*disconnect)(void);
 } wifi_ops_t;
 
-// WiFi 特有宏定义
-#define WIFI_RSSI_INVALID (-127) // 无信号/未加载时的信号强度默认值
-
-// 统一安全代理 API (内联展开，零开销防御段错误)
-static inline sys_err_t wifi_connect(const char *ssid, const char *pwd)
+/** @brief 连接指定无线网络。 */
+static inline sys_err_t wifi_connect(const char *ssid, const char *password)
 {
-	wifi_ops_t *ops = (wifi_ops_t *)sys_subsystem_get_lock(SYS_MOD_WIFI);
-	if (!ops) {
-		return SYS_ERR_NOT_FOUND;
+	sys_service_ref_t ref;
+	sys_err_t ret;
+
+	if (ssid == NULL || password == NULL) {
+		return SYS_ERR_INVALID_PARAM;
 	}
-	if (!ops->connect) {
-		sys_subsystem_put_lock(SYS_MOD_WIFI);
-		return SYS_ERR_NOT_SUPPORTED;
+	ret = sys_service_acquire(SYS_MOD_WIFI, WIFI_INTERFACE_CONTROL, WIFI_ABI_VERSION, sizeof(wifi_ops_t), &ref);
+	if (ret != SYS_OK) {
+		return ret;
 	}
-	int ret = ops->connect(ssid, pwd);
-	sys_subsystem_put_lock(SYS_MOD_WIFI);
+	const wifi_ops_t *ops = ref.ops;
+	ret = ops->connect == NULL ? SYS_ERR_NOT_SUPPORTED : ops->connect(ssid, password);
+	sys_service_release(&ref);
 	return ret;
 }
 
-static inline int wifi_get_rssi(void)
+/** @brief 获取当前信号强度。 */
+static inline sys_err_t wifi_get_rssi(int *out_rssi)
 {
-	wifi_ops_t *ops = (wifi_ops_t *)sys_subsystem_get_lock(SYS_MOD_WIFI);
-	if (!ops) {
-		return WIFI_RSSI_INVALID;
+	sys_service_ref_t ref;
+	sys_err_t ret;
+
+	if (out_rssi == NULL) {
+		return SYS_ERR_INVALID_PARAM;
 	}
-	int rssi = WIFI_RSSI_INVALID;
-	if (ops->get_rssi) {
-		rssi = ops->get_rssi();
+	ret = sys_service_acquire(SYS_MOD_WIFI, WIFI_INTERFACE_CONTROL, WIFI_ABI_VERSION, sizeof(wifi_ops_t), &ref);
+	if (ret != SYS_OK) {
+		return ret;
 	}
-	sys_subsystem_put_lock(SYS_MOD_WIFI);
-	return rssi;
+	const wifi_ops_t *ops = ref.ops;
+	ret = ops->get_rssi == NULL ? SYS_ERR_NOT_SUPPORTED : ops->get_rssi(out_rssi);
+	sys_service_release(&ref);
+	return ret;
 }
 
-static inline void wifi_disconnect(void)
+/** @brief 断开无线网络。 */
+static inline sys_err_t wifi_disconnect(void)
 {
-	wifi_ops_t *ops = (wifi_ops_t *)sys_subsystem_get_lock(SYS_MOD_WIFI);
-	if (ops) {
-		if (ops->disconnect) {
-			ops->disconnect();
-		}
-		sys_subsystem_put_lock(SYS_MOD_WIFI);
+	sys_service_ref_t ref;
+	sys_err_t ret;
+
+	ret = sys_service_acquire(SYS_MOD_WIFI, WIFI_INTERFACE_CONTROL, WIFI_ABI_VERSION, sizeof(wifi_ops_t), &ref);
+	if (ret != SYS_OK) {
+		return ret;
 	}
+	const wifi_ops_t *ops = ref.ops;
+	ret = ops->disconnect == NULL ? SYS_ERR_NOT_SUPPORTED : ops->disconnect();
+	sys_service_release(&ref);
+	return ret;
 }
 
-#endif // WIFI_MOD_H
+#endif

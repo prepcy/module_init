@@ -1,31 +1,35 @@
+/**
+ * @file imu_mod.c
+ * @brief IMU 模块示例实现。
+ */
+
 #include "imu_mod.h"
-#include "sys_core.h"
-#include "app_modules.h"
-#include <stdio.h>
 
-static int imu_real_get_acceleration(float *x, float *y, float *z)
+static sys_err_t imu_real_get_acceleration(float *x, float *y, float *z)
 {
-	*x = 0.0f;
-	*y = 0.0f;
-	*z = 9.8f;
-	printf("[IMU驱动] 读取加速度成功: X=%.1f, Y=%.1f, Z=%.1f m/s^2\n", *x, *y, *z);
-	return 0;
+	*x = 0.0F;
+	*y = 0.0F;
+	*z = 9.8F;
+	return SYS_OK;
 }
 
-// 组装 IMU 操作集
-static const imu_ops_t my_real_imu_ops = { .get_acceleration = imu_real_get_acceleration };
+static const imu_ops_t g_imu_ops = {.get_acceleration = imu_real_get_acceleration};
 
-static int imu_subsys_init(void)
+static sys_err_t imu_init(void)
 {
-	// 注册 IMU 接口
-	printf("[IMU驱动] 正在自加载过程...\n");
-	sys_subsystem_register(SYS_MOD_IMU, (void *)&my_real_imu_ops);
-	return 0;
+	const sys_service_desc_t service = {.module_id = SYS_MOD_IMU,
+					    .interface_id = IMU_INTERFACE_CONTROL,
+					    .abi_version = IMU_ABI_VERSION,
+					    .ops_size = sizeof(g_imu_ops),
+					    .ops = &g_imu_ops,
+					    .name = "imu.control"};
+
+	return sys_service_register(&service);
 }
 
-static void imu_subsys_exit(void)
+static void imu_exit(void)
 {
-	printf("[IMU驱动] 正在注销释放过程...\n");
-	sys_subsystem_unregister(SYS_MOD_IMU);
+	(void)sys_service_unregister(SYS_MOD_IMU, IMU_INTERFACE_CONTROL);
 }
-APP_REGISTER(imu_subsys_init, imu_subsys_exit, SYS_MOD_IMU); // 自动开机关机生命周期托管
+
+SYS_COMPONENT_REGISTER(g_imu_component, SYS_MOD_IMU, "imu", SYS_COMPONENT_PHASE_SERVICE, NULL, 0U, imu_init, imu_exit);

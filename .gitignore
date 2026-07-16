@@ -1,6 +1,7 @@
 # Build directory
 output/
 bin/
+build/
 
 # CMake generated files
 CMakeFiles/
@@ -34,7 +35,6 @@ app_core
 *.log
 *.cache
 compile_commands.json
-.clang-format
 
 third_lib
 

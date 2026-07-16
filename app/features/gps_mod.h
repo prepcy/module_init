@@ -1,28 +1,38 @@
+/**
+ * @file gps_mod.h
+ * @brief GPS 模块类型化控制接口。
+ */
+
 #ifndef GPS_MOD_H
 #define GPS_MOD_H
 
-#include "sys_core.h"
 #include "app_modules.h"
+#include "sys_core.h"
 
-// GPS 专属操作虚表
+#define GPS_INTERFACE_CONTROL 1U
+#define GPS_ABI_VERSION 1U
+
 typedef struct {
-	int (*get_coordinates)(double *latitude, double *longitude);
+	sys_err_t (*get_coordinates)(double *latitude, double *longitude);
 } gps_ops_t;
 
-// 统一安全代理 API (内联展开，零开销防御段错误)
+/** @brief 获取当前经纬度。 */
 static inline sys_err_t gps_get_coordinates(double *latitude, double *longitude)
 {
-	gps_ops_t *ops = (gps_ops_t *)sys_subsystem_get_lock(SYS_MOD_GPS);
-	if (!ops) {
-		return SYS_ERR_NOT_FOUND;
+	sys_service_ref_t ref;
+	sys_err_t ret;
+
+	if (latitude == NULL || longitude == NULL) {
+		return SYS_ERR_INVALID_PARAM;
 	}
-	if (!ops->get_coordinates) {
-		sys_subsystem_put_lock(SYS_MOD_GPS);
-		return SYS_ERR_NOT_SUPPORTED;
+	ret = sys_service_acquire(SYS_MOD_GPS, GPS_INTERFACE_CONTROL, GPS_ABI_VERSION, sizeof(gps_ops_t), &ref);
+	if (ret != SYS_OK) {
+		return ret;
 	}
-	int ret = ops->get_coordinates(latitude, longitude);
-	sys_subsystem_put_lock(SYS_MOD_GPS);
+	const gps_ops_t *ops = ref.ops;
+	ret = ops->get_coordinates == NULL ? SYS_ERR_NOT_SUPPORTED : ops->get_coordinates(latitude, longitude);
+	sys_service_release(&ref);
 	return ret;
 }
 
-#endif // GPS_MOD_H
+#endif

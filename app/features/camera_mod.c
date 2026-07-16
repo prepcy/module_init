@@ -1,160 +1,275 @@
-#include "camera_mod.h"
-#include "sys_core.h"
-#include "app_modules.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+/**
+ * @file camera_mod.c
+ * @brief Camera 数据生产者示例。
+ */
+
 #include <pthread.h>
-#include <unistd.h>
-#include <sys/time.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
 
-#define CAM_POOL_SIZE 4
-#define CAM_FRAME_CAPACITY 256
+#include "camera_mod.h"
 
-static sys_buffer_t g_cam_buffer_pool[CAM_POOL_SIZE];
-static volatile int g_cam_streaming = 0;
-static pthread_t g_cam_thread;
-static sys_ringbuf_t *g_cam_rb = NULL;
-static unsigned int g_frame_counter = 0;
+#define CAMERA_MAX_FRAME_SIZE (64U * 1024U * 1024U)
+#define CAMERA_MAX_BUFFER_COUNT 64U
+#define CAMERA_MAX_FPS 240U
 
-// 模拟硬件中断/数据采集线程入口：向环形队列中放入视频帧
-static void *camera_producer_worker(void *arg)
+typedef enum {
+	CAMERA_STATE_STOPPED = 0,
+	CAMERA_STATE_STARTING,
+	CAMERA_STATE_RUNNING,
+	CAMERA_STATE_STOPPING,
+	CAMERA_STATE_ERROR
+} camera_state_t;
+
+static pthread_mutex_t g_camera_mutex = PTHREAD_MUTEX_INITIALIZER;
+static camera_state_t g_camera_state = CAMERA_STATE_STOPPED;
+static atomic_bool g_camera_streaming;
+static pthread_t g_camera_thread;
+static bool g_camera_thread_started;
+static sys_buffer_pool_t *g_camera_pool;
+static sys_channel_t *g_camera_channel;
+static camera_stream_config_t g_camera_config;
+static uint64_t g_frame_sequence;
+static uint64_t g_dropped_frames;
+
+static void sleep_milliseconds(unsigned int milliseconds)
 {
-	(void)arg;
-	printf("[Camera] 摄像头视频帧采集线程已启动...\n");
-	while (g_cam_streaming) {
-		// 1. 从共享缓冲池中获取空闲块 (Zero-Copy 资源复用)
-		sys_buffer_t *buf = sys_buffer_get_free(g_cam_buffer_pool, CAM_POOL_SIZE);
-		if (buf == NULL) {
-			// 缓冲池已满，等待消费者消费，稍微避让
-			usleep(10000); // 10ms
+	struct timespec delay = {.tv_sec = (time_t)(milliseconds / 1000U),
+				 .tv_nsec = (long)(milliseconds % 1000U) * 1000000L};
+
+	while (nanosleep(&delay, &delay) != 0) {
+	}
+}
+
+static uint64_t monotonic_microseconds(void)
+{
+	struct timespec now;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return (uint64_t)now.tv_sec * 1000000U + (uint64_t)now.tv_nsec / 1000U;
+}
+
+static void *camera_producer(void *argument)
+{
+	const unsigned int frame_interval_ms = 1000U / g_camera_config.fps;
+	(void)argument;
+
+	while (atomic_load_explicit(&g_camera_streaming, memory_order_acquire)) {
+		sys_buffer_t *buffer;
+		sys_err_t ret = sys_buffer_acquire(g_camera_pool, &buffer);
+
+		if (ret != SYS_OK) {
+			g_dropped_frames++;
+			sleep_milliseconds(frame_interval_ms);
 			continue;
 		}
 
-		// 2. 模拟向缓冲区写入原始摄像头帧数据
-		snprintf((char *)buf->payload, buf->capacity, "CAMERA_RAW_FRAME_#%03u_MOCK_YUV", g_frame_counter);
-		buf->length = strlen((char *)buf->payload) + 1;
-		buf->frame_seq = g_frame_counter++;
+		int length = snprintf(sys_buffer_data(buffer), sys_buffer_capacity(buffer), "CAMERA_FRAME_%06llu",
+				      (unsigned long long)g_frame_sequence);
+		if (length < 0 || (size_t)length >= sys_buffer_capacity(buffer)) {
+			sys_buffer_release(buffer);
+			break;
+		}
+		(void)sys_buffer_set_size(buffer, (size_t)length + 1U);
+		sys_buffer_set_sequence(buffer, g_frame_sequence++);
+		sys_buffer_set_timestamp(buffer, monotonic_microseconds());
 
-		struct timeval tv;
-		gettimeofday(&tv, NULL);
-		buf->timestamp = tv.tv_sec * 1000000ULL + tv.tv_usec;
-
-		// 3. 将 Buffer 指针推入环形队列 (QBUF 入队)
-		sys_ringbuf_put(g_cam_rb, buf);
-
-		printf("[Camera] 成功采集并发布视频帧 - Seq: %u, Size: %zu bytes, 缓冲区引用计数: %d\n",
-		       buf->frame_seq, buf->length, buf->ref_count);
-
-		// 4. 减一引用计数 (因为 get_free 会自动 +1 表示本分配，put 会再 +1，
-		// 现在交给 RingBuffer 后本线程不再持有它，故做一次 unref 移交所有权)
-		sys_buffer_unref(buf);
-
-		// 模拟 5 FPS 帧率 (200ms 一帧)
-		usleep(200000);
+		ret = sys_channel_send(g_camera_channel, buffer, 0);
+		if (ret != SYS_OK && ret != SYS_ERR_CLOSED) {
+			g_dropped_frames++;
+		}
+		sys_buffer_release(buffer);
+		if (ret == SYS_ERR_CLOSED) {
+			break;
+		}
+		sleep_milliseconds(frame_interval_ms);
 	}
-	printf("[Camera] 摄像头视频帧采集线程已退出。\n");
 	return NULL;
 }
 
-// 兼容原系统接口实现
-static int cam_real_start(int fps, int w, int h)
+static sys_err_t calculate_frame_capacity(const camera_stream_config_t *config, size_t *out_capacity)
 {
-	printf("[Camera驱动] 开启视频流成功！参数: %d FPS, 分辨率: %dx%d\n", fps, w, h);
-	return 0;
+	size_t pixels;
+
+	if (config == NULL || out_capacity == NULL || config->fps == 0U || config->fps > CAMERA_MAX_FPS ||
+	    config->width == 0U || config->height == 0U || config->buffer_count < 2U ||
+	    config->buffer_count > CAMERA_MAX_BUFFER_COUNT || config->width > SIZE_MAX / config->height) {
+		return SYS_ERR_INVALID_PARAM;
+	}
+	pixels = (size_t)config->width * config->height;
+	if (pixels > SIZE_MAX / 3U) {
+		return SYS_ERR_INVALID_PARAM;
+	}
+	*out_capacity = pixels * 3U / 2U;
+	if (*out_capacity == 0U || *out_capacity > CAMERA_MAX_FRAME_SIZE) {
+		return SYS_ERR_INVALID_PARAM;
+	}
+	return SYS_OK;
 }
 
-static const camera_ops_t my_real_cam_ops = {
-	.start_stream = cam_real_start,
-	.get_frame_buffer = NULL,
-	.stop_stream = NULL
-};
-
-// 虚拟字符设备操作表
-static int camera_real_ioctl(unsigned int cmd, void *arg)
+static void cleanup_stream_resources(void)
 {
-	(void)arg;
-	switch (cmd) {
-	case CMD_CAM_START_STREAM:
-		if (g_cam_streaming) return 0;
-
-		// 创建 RingBuffer，深度为 4
-		g_cam_rb = sys_ringbuf_create(CAM_POOL_SIZE);
-		if (!g_cam_rb) return -1;
-
-		g_cam_streaming = 1;
-		pthread_create(&g_cam_thread, NULL, camera_producer_worker, NULL);
-
-		// 发布流媒体启动事件，将 RingBuffer 指针广播给订阅者 (如 ZLMedia)
-		sys_event_publish(EVENT_CAM_STREAM_START, &g_cam_rb, sizeof(sys_ringbuf_t *));
-		printf("[Camera] 成功启动摄像头采集并广播 EVENT_CAM_STREAM_START 事件。\n");
-		break;
-
-	case CMD_CAM_STOP_STREAM:
-		if (!g_cam_streaming) return 0;
-
-		printf("[Camera] 正在停止摄像头采集并广播 EVENT_CAM_STREAM_STOP 事件...\n");
-		// 先广播通知消费者停止消费
-		sys_event_publish(EVENT_CAM_STREAM_STOP, NULL, 0);
-
-		g_cam_streaming = 0;
-		pthread_join(g_cam_thread, NULL);
-
-		sys_ringbuf_destroy(g_cam_rb);
-		g_cam_rb = NULL;
-		break;
-
-	default:
-		return -1;
+	if (g_camera_channel != NULL) {
+		sys_channel_release(g_camera_channel);
+		g_camera_channel = NULL;
 	}
-	return 0;
+	if (g_camera_pool != NULL) {
+		(void)sys_buffer_pool_wait_idle(g_camera_pool, 2000);
+		(void)sys_buffer_pool_destroy(&g_camera_pool);
+	}
 }
 
-static const sys_dev_ops_t my_camera_dev_ops = {
-	.open = NULL,
-	.close = NULL,
-	.read = NULL,
-	.write = NULL,
-	.ioctl = camera_real_ioctl
-};
-
-static int camera_subsys_init(void)
+static sys_err_t create_stream_resources(const camera_stream_config_t *config, size_t frame_capacity)
 {
-	printf("[Camera驱动] 正在自加载过程...\n");
+	sys_err_t ret = sys_buffer_pool_create(config->buffer_count, frame_capacity, &g_camera_pool);
 
-	// 初始化共享内存缓冲池
-	for (int i = 0; i < CAM_POOL_SIZE; i++) {
-		g_cam_buffer_pool[i].payload = malloc(CAM_FRAME_CAPACITY);
-		g_cam_buffer_pool[i].capacity = CAM_FRAME_CAPACITY;
-		g_cam_buffer_pool[i].length = 0;
-		g_cam_buffer_pool[i].ref_count = 0;
-		g_cam_buffer_pool[i].frame_seq = 0;
+	if (ret == SYS_OK) {
+		ret = sys_channel_create(config->buffer_count, &g_camera_channel);
+	}
+	if (ret != SYS_OK) {
+		cleanup_stream_resources();
+		return ret;
 	}
 
-	// 注册传统接口槽位，用以维持安全代理向后兼容性
-	sys_subsystem_register(SYS_MOD_CAMERA, (void *)&my_real_cam_ops);
-
-	// 统一注册字符设备到对应模块引脚槽，支持 VFS/ioctl 控制
-	sys_subsystem_register(SYS_MOD_CAMERA, (void *)&my_camera_dev_ops);
-
-	return 0;
+	g_camera_config = *config;
+	g_frame_sequence = 0U;
+	g_dropped_frames = 0U;
+	atomic_store_explicit(&g_camera_streaming, true, memory_order_release);
+	if (pthread_create(&g_camera_thread, NULL, camera_producer, NULL) != 0) {
+		atomic_store_explicit(&g_camera_streaming, false, memory_order_release);
+		cleanup_stream_resources();
+		return SYS_ERR_GENERIC;
+	}
+	g_camera_thread_started = true;
+	return SYS_OK;
 }
 
-static void camera_subsys_exit(void)
+static void rollback_stream_start(const camera_stream_event_t *event)
 {
-	printf("[Camera驱动] 正在注销释放过程...\n");
-
-	if (g_cam_streaming) {
-		camera_real_ioctl(CMD_CAM_STOP_STREAM, NULL);
-	}
-
-	// 释放共享缓存块内存
-	for (int i = 0; i < CAM_POOL_SIZE; i++) {
-		free(g_cam_buffer_pool[i].payload);
-		g_cam_buffer_pool[i].payload = NULL;
-	}
-
-	sys_subsystem_unregister(SYS_MOD_CAMERA);
+	pthread_mutex_lock(&g_camera_mutex);
+	g_camera_state = CAMERA_STATE_STOPPING;
+	pthread_mutex_unlock(&g_camera_mutex);
+	atomic_store_explicit(&g_camera_streaming, false, memory_order_release);
+	sys_channel_close(g_camera_channel);
+	pthread_join(g_camera_thread, NULL);
+	g_camera_thread_started = false;
+	(void)sys_event_publish_sync(CAMERA_EVENT_STREAM_STOPPING, event, sizeof(*event));
+	cleanup_stream_resources();
+	pthread_mutex_lock(&g_camera_mutex);
+	g_camera_state = CAMERA_STATE_STOPPED;
+	pthread_mutex_unlock(&g_camera_mutex);
 }
 
-APP_REGISTER(camera_subsys_init, camera_subsys_exit, SYS_MOD_CAMERA);
+static sys_err_t camera_real_start(const camera_stream_config_t *config)
+{
+	camera_stream_event_t event;
+	size_t frame_capacity;
+	sys_err_t ret;
+
+	ret = calculate_frame_capacity(config, &frame_capacity);
+	if (ret != SYS_OK) {
+		return ret;
+	}
+	pthread_mutex_lock(&g_camera_mutex);
+	if (g_camera_state != CAMERA_STATE_STOPPED || g_camera_pool != NULL) {
+		pthread_mutex_unlock(&g_camera_mutex);
+		return SYS_ERR_STATE;
+	}
+	g_camera_state = CAMERA_STATE_STARTING;
+	ret = create_stream_resources(config, frame_capacity);
+	if (ret != SYS_OK) {
+		g_camera_state = CAMERA_STATE_STOPPED;
+		pthread_mutex_unlock(&g_camera_mutex);
+		return ret;
+	}
+
+	event.channel = g_camera_channel;
+	event.config = g_camera_config;
+	pthread_mutex_unlock(&g_camera_mutex);
+	ret = sys_event_publish_sync(CAMERA_EVENT_STREAM_STARTED, &event, sizeof(event));
+	if (ret != SYS_OK) {
+		rollback_stream_start(&event);
+		return ret;
+	}
+
+	pthread_mutex_lock(&g_camera_mutex);
+	g_camera_state = CAMERA_STATE_RUNNING;
+	pthread_mutex_unlock(&g_camera_mutex);
+	printf("[Camera] stream started: %ux%u @ %u fps, %zu buffers\n", config->width, config->height, config->fps,
+	       config->buffer_count);
+	return SYS_OK;
+}
+
+static sys_err_t camera_real_stop(void)
+{
+	camera_stream_event_t event;
+	sys_err_t event_ret;
+	sys_err_t pool_ret = SYS_OK;
+
+	pthread_mutex_lock(&g_camera_mutex);
+	if (g_camera_state == CAMERA_STATE_STOPPED) {
+		pthread_mutex_unlock(&g_camera_mutex);
+		return SYS_OK;
+	}
+	if (g_camera_state != CAMERA_STATE_RUNNING || g_camera_pool == NULL || g_camera_channel == NULL) {
+		pthread_mutex_unlock(&g_camera_mutex);
+		return SYS_ERR_BUSY;
+	}
+	g_camera_state = CAMERA_STATE_STOPPING;
+	event.channel = g_camera_channel;
+	event.config = g_camera_config;
+	pthread_mutex_unlock(&g_camera_mutex);
+
+	atomic_store_explicit(&g_camera_streaming, false, memory_order_release);
+	sys_channel_close(g_camera_channel);
+	if (g_camera_thread_started) {
+		pthread_join(g_camera_thread, NULL);
+		g_camera_thread_started = false;
+	}
+
+	event_ret = sys_event_publish_sync(CAMERA_EVENT_STREAM_STOPPING, &event, sizeof(event));
+	sys_channel_release(g_camera_channel);
+	g_camera_channel = NULL;
+	pool_ret = sys_buffer_pool_wait_idle(g_camera_pool, 2000);
+	if (pool_ret == SYS_OK) {
+		pool_ret = sys_buffer_pool_destroy(&g_camera_pool);
+	}
+	printf("[Camera] stream stopped, dropped frames: %llu\n", (unsigned long long)g_dropped_frames);
+	pthread_mutex_lock(&g_camera_mutex);
+	g_camera_state = g_camera_pool == NULL ? CAMERA_STATE_STOPPED : CAMERA_STATE_ERROR;
+	pthread_mutex_unlock(&g_camera_mutex);
+	return event_ret != SYS_OK ? event_ret : pool_ret;
+}
+
+static bool camera_real_is_streaming(void)
+{
+	return atomic_load_explicit(&g_camera_streaming, memory_order_acquire);
+}
+
+static const camera_ops_t g_camera_ops = {
+	.start_stream = camera_real_start, .stop_stream = camera_real_stop, .is_streaming = camera_real_is_streaming};
+
+static sys_err_t camera_init(void)
+{
+	const sys_service_desc_t service = {.module_id = SYS_MOD_CAMERA,
+					    .interface_id = CAMERA_INTERFACE_CONTROL,
+					    .abi_version = CAMERA_ABI_VERSION,
+					    .ops_size = sizeof(g_camera_ops),
+					    .ops = &g_camera_ops,
+					    .name = "camera.control"};
+
+	atomic_init(&g_camera_streaming, false);
+	g_camera_state = CAMERA_STATE_STOPPED;
+	return sys_service_register(&service);
+}
+
+static void camera_exit(void)
+{
+	(void)camera_real_stop();
+	(void)sys_service_unregister(SYS_MOD_CAMERA, CAMERA_INTERFACE_CONTROL);
+}
+
+SYS_COMPONENT_REGISTER(g_camera_component, SYS_MOD_CAMERA, "camera", SYS_COMPONENT_PHASE_SERVICE, NULL, 0U, camera_init,
+		       camera_exit);

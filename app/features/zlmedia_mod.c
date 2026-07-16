@@ -1,118 +1,185 @@
-#include "zlmedia_mod.h"
-#include "sys_core.h"
-#include "app_modules.h"
-#include <stdio.h>
+/**
+ * @file zlmedia_mod.c
+ * @brief 视频数据通道消费者示例。
+ */
+
 #include <pthread.h>
-#include <unistd.h>
+#include <stdatomic.h>
+#include <stdio.h>
 
-static int g_zlm_port = 8554;
-static volatile int g_zlm_streaming = 0;
-static pthread_t g_zlm_thread;
-static sys_ringbuf_t *g_zlm_rb = NULL;
+#include "camera_mod.h"
+#include "zlmedia_mod.h"
 
-// 消费者线程入口：从环形缓冲区中提取视频帧并消耗
-static void *zlmedia_consumer_worker(void *arg)
+static pthread_mutex_t g_zlmedia_mutex = PTHREAD_MUTEX_INITIALIZER;
+static atomic_bool g_zlmedia_running;
+static pthread_t g_zlmedia_thread;
+static bool g_zlmedia_thread_started;
+static sys_channel_t *g_zlmedia_channel;
+static unsigned int g_zlmedia_port = 8554U;
+static uint64_t g_consumed_frames;
+static sys_event_subscription_t *g_start_subscription;
+static sys_event_subscription_t *g_stop_subscription;
+
+static void *zlmedia_consumer(void *argument)
 {
-	(void)arg;
-	printf("[ZLMedia] 流媒体服务器拉流线程已启动...\n");
-	while (g_zlm_streaming) {
-		// 带 500ms 超时获取 Buffer，防止关闭时卡死
-		sys_buffer_t *buf = sys_ringbuf_get(g_zlm_rb, 500);
-		if (buf) {
-			// 读取 payload 模拟帧处理，全程零拷贝
-			printf("[ZLMedia] 成功消费视频帧 - Seq: %u, Size: %zu bytes, Payload: %s, 缓冲区引用计数: %d\n",
-			       buf->frame_seq, buf->length, (char *)buf->payload, buf->ref_count);
-			
-			// 模拟处理耗时
-			usleep(100000); // 100ms
-			
-			// 释放引用计数，归还共享内存池
-			sys_buffer_unref(buf);
+	sys_channel_t *channel = argument;
+
+	while (atomic_load_explicit(&g_zlmedia_running, memory_order_acquire)) {
+		sys_buffer_t *buffer;
+		sys_err_t ret = sys_channel_receive(channel, &buffer, 200);
+
+		if (ret == SYS_ERR_TIMEOUT) {
+			continue;
 		}
+		if (ret == SYS_ERR_CLOSED) {
+			break;
+		}
+		if (ret != SYS_OK) {
+			break;
+		}
+
+		g_consumed_frames++;
+		if (g_consumed_frames == 1U || g_consumed_frames % 30U == 0U) {
+			printf("[ZLMedia] frame=%llu size=%zu timestamp=%llu payload=%s\n",
+			       (unsigned long long)sys_buffer_sequence(buffer), sys_buffer_size(buffer),
+			       (unsigned long long)sys_buffer_timestamp(buffer), (char *)sys_buffer_data(buffer));
+		}
+		sys_buffer_release(buffer);
 	}
-	printf("[ZLMedia] 流媒体服务器拉流线程已退出。\n");
 	return NULL;
 }
 
-// 订阅 Camera 事件的回调函数
-static void on_camera_stream_event(const sys_event_t *event, void *priv_data)
+static void detach_stream(void)
 {
-	(void)priv_data;
-	if (event->event_id == EVENT_CAM_STREAM_START) {
-		if (event->param_len == sizeof(sys_ringbuf_t *)) {
-			g_zlm_rb = *(sys_ringbuf_t **)event->param;
-			g_zlm_streaming = 1;
-			printf("[ZLMedia] 【异步回调验证】检测到 Camera 视频流开始，模拟 1.0 秒网络连接阻塞...\n");
-			sleep(1); // 模拟网络阻塞
-			printf("[ZLMedia] 【异步回调验证】网络连接成功，建立流媒体拉流线程。\n");
-			pthread_create(&g_zlm_thread, NULL, zlmedia_consumer_worker, NULL);
-		}
-	} else if (event->event_id == EVENT_CAM_STREAM_STOP) {
-		printf("[ZLMedia] 检测到 Camera 视频流停止事件，正在释放消费句柄...\n");
-		g_zlm_streaming = 0;
-		pthread_join(g_zlm_thread, NULL);
-		g_zlm_rb = NULL;
+	pthread_t thread;
+	sys_channel_t *channel;
+	bool should_join;
+
+	pthread_mutex_lock(&g_zlmedia_mutex);
+	atomic_store_explicit(&g_zlmedia_running, false, memory_order_release);
+	thread = g_zlmedia_thread;
+	channel = g_zlmedia_channel;
+	should_join = g_zlmedia_thread_started;
+	g_zlmedia_thread_started = false;
+	g_zlmedia_channel = NULL;
+	pthread_mutex_unlock(&g_zlmedia_mutex);
+
+	if (should_join) {
+		pthread_join(thread, NULL);
+	}
+	if (channel != NULL) {
+		sys_channel_release(channel);
 	}
 }
 
-// 设备 ioctl 接口控制
-static int zlmedia_real_ioctl(unsigned int cmd, void *arg)
+static sys_err_t on_stream_started(const sys_event_t *event, void *private_data)
 {
-	switch (cmd) {
-	case CMD_ZLM_GET_STATUS:
-		if (arg) {
-			*(int *)arg = g_zlm_streaming;
-		}
-		break;
-	case CMD_ZLM_SET_PORT:
-		if (arg) {
-			g_zlm_port = *(int *)arg;
-			printf("[ZLMedia] ioctl: 修改流媒体监听端口为 %d\n", g_zlm_port);
-		}
-		break;
-	default:
-		return -1;
+	const camera_stream_event_t *stream_event;
+	sys_err_t ret;
+	unsigned int port;
+	(void)private_data;
+
+	if (event->size != sizeof(camera_stream_event_t) || event->data == NULL) {
+		return SYS_ERR_INVALID_PARAM;
 	}
-	return 0;
-}
+	stream_event = event->data;
 
-static const sys_dev_ops_t my_zlmedia_dev_ops = {
-	.open = NULL,
-	.close = NULL,
-	.read = NULL,
-	.write = NULL,
-	.ioctl = zlmedia_real_ioctl
-};
-
-static int zlmedia_subsys_init(void)
-{
-	printf("[ZLMedia] 正在自加载过程...\n");
-
-	// 注册设备操作表
-	sys_subsystem_register(SYS_MOD_ZLMEDIA, (void *)&my_zlmedia_dev_ops);
-
-	// 异步订阅控制流事件 (EVENT_FLAG_ASYNC 异步分发，防卡死发布端)
-	sys_event_subscribe_type(EVENT_CAM_STREAM_START, on_camera_stream_event, NULL, EVENT_FLAG_ASYNC);
-	sys_event_subscribe_type(EVENT_CAM_STREAM_STOP, on_camera_stream_event, NULL, EVENT_FLAG_ASYNC);
-
-	return 0;
-}
-
-static void zlmedia_subsys_exit(void)
-{
-	printf("[ZLMedia] 正在注销释放过程...\n");
-
-	// 取消订阅
-	sys_event_unsubscribe(EVENT_CAM_STREAM_START, on_camera_stream_event);
-	sys_event_unsubscribe(EVENT_CAM_STREAM_STOP, on_camera_stream_event);
-
-	// 如果仍在运行，强制关闭
-	if (g_zlm_streaming) {
-		g_zlm_streaming = 0;
-		pthread_join(g_zlm_thread, NULL);
+	pthread_mutex_lock(&g_zlmedia_mutex);
+	if (g_zlmedia_thread_started) {
+		pthread_mutex_unlock(&g_zlmedia_mutex);
+		return SYS_ERR_STATE;
 	}
-
-	sys_subsystem_unregister(SYS_MOD_ZLMEDIA);
+	ret = sys_channel_retain(stream_event->channel);
+	if (ret != SYS_OK) {
+		pthread_mutex_unlock(&g_zlmedia_mutex);
+		return ret;
+	}
+	g_zlmedia_channel = stream_event->channel;
+	g_consumed_frames = 0U;
+	atomic_store_explicit(&g_zlmedia_running, true, memory_order_release);
+	if (pthread_create(&g_zlmedia_thread, NULL, zlmedia_consumer, g_zlmedia_channel) != 0) {
+		atomic_store_explicit(&g_zlmedia_running, false, memory_order_release);
+		sys_channel_release(g_zlmedia_channel);
+		g_zlmedia_channel = NULL;
+		pthread_mutex_unlock(&g_zlmedia_mutex);
+		return SYS_ERR_GENERIC;
+	}
+	g_zlmedia_thread_started = true;
+	port = g_zlmedia_port;
+	pthread_mutex_unlock(&g_zlmedia_mutex);
+	printf("[ZLMedia] attached camera stream on port %u\n", port);
+	return SYS_OK;
 }
 
-APP_REGISTER(zlmedia_subsys_init, zlmedia_subsys_exit, SYS_MOD_ZLMEDIA);
+static sys_err_t on_stream_stopping(const sys_event_t *event, void *private_data)
+{
+	(void)private_data;
+	if (event->size != sizeof(camera_stream_event_t) || event->data == NULL) {
+		return SYS_ERR_INVALID_PARAM;
+	}
+	detach_stream();
+	printf("[ZLMedia] detached camera stream, consumed frames: %llu\n", (unsigned long long)g_consumed_frames);
+	return SYS_OK;
+}
+
+static sys_err_t zlmedia_real_set_port(unsigned int port)
+{
+	if (port == 0U || port > 65535U) {
+		return SYS_ERR_INVALID_PARAM;
+	}
+	pthread_mutex_lock(&g_zlmedia_mutex);
+	g_zlmedia_port = port;
+	pthread_mutex_unlock(&g_zlmedia_mutex);
+	return SYS_OK;
+}
+
+static sys_err_t zlmedia_real_get_streaming(bool *out_streaming)
+{
+	*out_streaming = atomic_load_explicit(&g_zlmedia_running, memory_order_acquire);
+	return SYS_OK;
+}
+
+static const zlmedia_ops_t g_zlmedia_ops = {.set_port = zlmedia_real_set_port,
+					    .get_streaming = zlmedia_real_get_streaming};
+
+static sys_err_t zlmedia_init(void)
+{
+	const sys_service_desc_t service = {.module_id = SYS_MOD_ZLMEDIA,
+					    .interface_id = ZLMEDIA_INTERFACE_CONTROL,
+					    .abi_version = ZLMEDIA_ABI_VERSION,
+					    .ops_size = sizeof(g_zlmedia_ops),
+					    .ops = &g_zlmedia_ops,
+					    .name = "zlmedia.control"};
+	sys_err_t ret;
+
+	atomic_init(&g_zlmedia_running, false);
+	ret = sys_event_subscribe(CAMERA_EVENT_STREAM_STARTED, on_stream_started, NULL, &g_start_subscription);
+	if (ret == SYS_OK) {
+		ret = sys_event_subscribe(CAMERA_EVENT_STREAM_STOPPING, on_stream_stopping, NULL, &g_stop_subscription);
+	}
+	if (ret == SYS_OK) {
+		ret = sys_service_register(&service);
+	}
+	if (ret != SYS_OK) {
+		if (g_stop_subscription != NULL) {
+			(void)sys_event_unsubscribe(&g_stop_subscription);
+		}
+		if (g_start_subscription != NULL) {
+			(void)sys_event_unsubscribe(&g_start_subscription);
+		}
+	}
+	return ret;
+}
+
+static void zlmedia_exit(void)
+{
+	(void)sys_event_unsubscribe(&g_stop_subscription);
+	(void)sys_event_unsubscribe(&g_start_subscription);
+	detach_stream();
+	(void)sys_service_unregister(SYS_MOD_ZLMEDIA, ZLMEDIA_INTERFACE_CONTROL);
+}
+
+static const uint32_t g_zlmedia_dependencies[] = {SYS_MOD_CAMERA};
+
+SYS_COMPONENT_REGISTER(g_zlmedia_component, SYS_MOD_ZLMEDIA, "zlmedia", SYS_COMPONENT_PHASE_SERVICE,
+		       g_zlmedia_dependencies, SYS_ARRAY_SIZE(g_zlmedia_dependencies), zlmedia_init, zlmedia_exit);

@@ -1,14 +1,15 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # 一键编译脚本
 # 若任意步骤出错，则立即停止运行
-set -e
+set -euo pipefail
 
 # 获取当前脚本所在目录作为工作根路径
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 BUILD_DIR="${SCRIPT_DIR}/output"
 CONFIG_FILE="${SCRIPT_DIR}/.config"
 DEFCONFIG_FILE="${SCRIPT_DIR}/tools/defconfig"
+BUILD_TYPE="${BUILD_TYPE:-Debug}"
 
 # 帮助信息输出函数
 show_help() {
@@ -19,6 +20,8 @@ show_help() {
     echo "  load [FILE]                   从文件导入配置到 .config (缺省时默认使用 tools/defconfig)"
     echo "  save [FILE]                   将当前 .config 保存到指定文件 (缺省时默认覆盖 tools/defconfig)"
     echo "  clean                         清空 build 构建目录"
+    echo "  debug                         使用 Debug 模式构建"
+    echo "  release                       使用 Release + LTO 模式构建"
     echo "  -h, --help                    显示本帮助信息"
     echo ""
     echo "说明:"
@@ -88,9 +91,13 @@ if [ "$#" -gt 0 ]; then
             run_clean
             exit 0 ;;
         load|--load)
-            run_load "$2" ;;
+            run_load "${2:-}" ;;
         save|--save)
-            run_save "$2" ;;
+            run_save "${2:-}" ;;
+        debug|--debug)
+            BUILD_TYPE="Debug" ;;
+        release|--release)
+            BUILD_TYPE="Release" ;;
         -h|--help)
             show_help ;;
         *)
@@ -116,19 +123,15 @@ echo "============================================="
 echo "[CONFIG] 正在加载 .config 进行 CMake 配置..."
 echo "============================================="
 
-# 创建并进入构建目录
-mkdir -p "${BUILD_DIR}"
-cd "${BUILD_DIR}"
-
-# 运行 cmake，配置参数全部交由 ParseConfig.cmake 自动读取并覆盖
-cmake -DCMAKE_BUILD_TYPE=Debug "${SCRIPT_DIR}"
+# 运行 CMake，配置参数由 .config 和构建模式共同决定
+cmake -S "${SCRIPT_DIR}" -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
 
 # 执行多线程编译
 echo "[BUILD] 正在编译源文件..."
-make -j$(nproc 2>/dev/null || echo 4)
+cmake --build "${BUILD_DIR}" --parallel "$(nproc 2>/dev/null || echo 4)"
 
 # 创建 compile_commands.json 软链接到项目根目录，供 clangd / VS Code 用于 IDE 补全与跳转
-if [ -f "compile_commands.json" ]; then
+if [ -f "${BUILD_DIR}/compile_commands.json" ]; then
     ln -sf "${BUILD_DIR}/compile_commands.json" "${SCRIPT_DIR}/compile_commands.json"
     echo "[LINK] 已建立 compile_commands.json 到项目根目录的软链接。"
 fi
