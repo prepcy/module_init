@@ -42,7 +42,9 @@ static void on_camera_stream_event(const sys_event_t *event, void *priv_data)
 		if (event->param_len == sizeof(sys_ringbuf_t *)) {
 			g_zlm_rb = *(sys_ringbuf_t **)event->param;
 			g_zlm_streaming = 1;
-			printf("[ZLMedia] 检测到 Camera 视频流开始事件，正在拉取流数据...\n");
+			printf("[ZLMedia] 【异步回调验证】检测到 Camera 视频流开始，模拟 1.0 秒网络连接阻塞...\n");
+			sleep(1); // 模拟网络阻塞
+			printf("[ZLMedia] 【异步回调验证】网络连接成功，建立流媒体拉流线程。\n");
 			pthread_create(&g_zlm_thread, NULL, zlmedia_consumer_worker, NULL);
 		}
 	} else if (event->event_id == EVENT_CAM_STREAM_STOP) {
@@ -89,9 +91,9 @@ static int zlmedia_subsys_init(void)
 	// 注册设备操作表
 	sys_subsystem_register(SYS_MOD_ZLMEDIA, (void *)&my_zlmedia_dev_ops);
 
-	// 订阅控制流事件 (Camera 开始/结束事件)
-	sys_event_subscribe(EVENT_CAM_STREAM_START, on_camera_stream_event, NULL);
-	sys_event_subscribe(EVENT_CAM_STREAM_STOP, on_camera_stream_event, NULL);
+	// 异步订阅控制流事件 (EVENT_FLAG_ASYNC 异步分发，防卡死发布端)
+	sys_event_subscribe_type(EVENT_CAM_STREAM_START, on_camera_stream_event, NULL, EVENT_FLAG_ASYNC);
+	sys_event_subscribe_type(EVENT_CAM_STREAM_STOP, on_camera_stream_event, NULL, EVENT_FLAG_ASYNC);
 
 	return 0;
 }

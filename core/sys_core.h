@@ -123,6 +123,21 @@ sys_err_t sys_subsystem_unregister(int mod_id);
  */
 void *sys_subsystem_get(int mod_id);
 
+/**
+ * @brief 安全获取指定模块的操纵杆并锁定读生命周期
+ * @param mod_id 统一的业务引脚槽位 ID
+ * @return void* 对应操作指针 (如返回非 NULL，必须在使用毕后调用 sys_subsystem_put_lock 释放)
+ *
+ * 通过获取读锁（Shared Lock）防止其他控制线程在调用期间执行注销/卸载操作，杜绝野指针崩溃。
+ */
+void *sys_subsystem_get_lock(int mod_id);
+
+/**
+ * @brief 释放由 sys_subsystem_get_lock 加锁的读生命周期锁
+ * @param mod_id 统一的业务引脚槽位 ID
+ */
+void sys_subsystem_put_lock(int mod_id);
+
 /* =========================================================================
  * 3. 零拷贝数据通道机制 (Zero-Copy Ring Buffer & Buffer Pool)
  * ========================================================================= */
@@ -183,7 +198,16 @@ typedef struct {
 // 事件订阅回调函数类型
 typedef void (*event_cb_t)(const sys_event_t *event, void *priv_data);
 
+/**
+ * @brief 事件分发模式 (同步/异步)
+ */
+typedef enum {
+	EVENT_FLAG_SYNC = 0,   // 同步回调模式：在发布线程中立刻调用
+	EVENT_FLAG_ASYNC = 1   // 异步回调模式：深拷贝数据推入工作队列，独立线程异步消费
+} sys_event_flag_t;
+
 sys_err_t sys_event_subscribe(int event_id, event_cb_t callback, void *priv_data);
+sys_err_t sys_event_subscribe_type(int event_id, event_cb_t callback, void *priv_data, sys_event_flag_t flag);
 sys_err_t sys_event_unsubscribe(int event_id, event_cb_t callback);
 sys_err_t sys_event_publish(int event_id, const void *param, size_t param_len);
 
