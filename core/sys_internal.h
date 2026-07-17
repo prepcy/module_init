@@ -9,10 +9,10 @@
 #include "sys_types.h"
 
 sys_err_t sys_component_start_all(void);
-void sys_component_stop_all(void);
+sys_err_t sys_component_stop_all(void);
 
 sys_err_t sys_event_bus_start(void);
-void sys_event_bus_stop(void);
+sys_err_t sys_event_bus_stop(void);
 
 void sys_service_registry_reset(void);
 

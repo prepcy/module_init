@@ -1,0 +1,7 @@
+name=gps
+id=0x0200
+config=ENABLE_GPS
+prompt=启用 GPS 模块
+default=n
+sources=gps_mod.c
+depends=

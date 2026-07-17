@@ -25,10 +25,13 @@ static sys_err_t failing_init(void)
 
 static const uint32_t g_failing_dependencies[] = {READY_COMPONENT_ID};
 
-SYS_COMPONENT_REGISTER(g_ready_component, READY_COMPONENT_ID, "ready", SYS_COMPONENT_PHASE_SERVICE, NULL, 0U,
-		       ready_init, ready_exit);
-SYS_COMPONENT_REGISTER(g_failing_component, FAILING_COMPONENT_ID, "failing", SYS_COMPONENT_PHASE_SERVICE,
-		       g_failing_dependencies, SYS_ARRAY_SIZE(g_failing_dependencies), failing_init, NULL);
+SYS_COMPONENT_REGISTER(g_ready_component, .id = READY_COMPONENT_ID, .name = "ready",
+		       .phase = SYS_COMPONENT_PHASE_SERVICE, .policy = SYS_COMPONENT_REQUIRED, .init = ready_init,
+		       .deinit = ready_exit);
+SYS_COMPONENT_REGISTER(g_failing_component, .id = FAILING_COMPONENT_ID, .name = "failing",
+		       .phase = SYS_COMPONENT_PHASE_SERVICE, .policy = SYS_COMPONENT_REQUIRED,
+		       .dependencies = g_failing_dependencies,
+		       .dependency_count = SYS_ARRAY_SIZE(g_failing_dependencies), .init = failing_init);
 
 int main(void)
 {

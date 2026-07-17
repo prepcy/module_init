@@ -1,0 +1,7 @@
+name=camera
+id=0x0400
+config=ENABLE_CAMERA
+prompt=启用 Camera 模块
+default=y
+sources=camera_mod.c
+depends=

@@ -1,0 +1,8 @@
+# Copy this file to app/features/<name>.module and replace every value.
+name=example
+id=0x0600
+config=ENABLE_EXAMPLE
+prompt=启用 Example 模块
+default=n
+sources=example_mod.c
+depends=

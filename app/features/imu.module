@@ -1,0 +1,7 @@
+name=imu
+id=0x0300
+config=ENABLE_IMU
+prompt=启用 IMU 模块
+default=n
+sources=imu_mod.c
+depends=

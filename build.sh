@@ -8,7 +8,7 @@ set -euo pipefail
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 BUILD_DIR="${SCRIPT_DIR}/output"
 CONFIG_FILE="${SCRIPT_DIR}/.config"
-DEFCONFIG_FILE="${SCRIPT_DIR}/tools/defconfig"
+MENUCONFIG_SCRIPT="${SCRIPT_DIR}/tools/menuconfig.py"
 BUILD_TYPE="${BUILD_TYPE:-Debug}"
 
 # 帮助信息输出函数
@@ -17,8 +17,8 @@ show_help() {
     echo ""
     echo "命令参数:"
     echo "  menuconfig                    开启图形化配置界面"
-    echo "  load [FILE]                   从文件导入配置到 .config (缺省时默认使用 tools/defconfig)"
-    echo "  save [FILE]                   将当前 .config 保存到指定文件 (缺省时默认覆盖 tools/defconfig)"
+    echo "  load [FILE]                   从文件导入配置；缺省时根据模块清单生成默认配置"
+    echo "  save [FILE]                   导出当前配置；缺省文件为 app.config.backup"
     echo "  clean                         清空 build 构建目录"
     echo "  debug                         使用 Debug 模式构建"
     echo "  release                       使用 Release + LTO 模式构建"
@@ -31,16 +31,15 @@ show_help() {
 
 # 运行 menuconfig
 run_menuconfig() {
-    local menuconfig_script="${SCRIPT_DIR}/tools/menuconfig.py"
-    if [ ! -f "${menuconfig_script}" ]; then
-        echo "错误: 未找到 menuconfig 脚本: ${menuconfig_script}" >&2
+    if [ ! -f "${MENUCONFIG_SCRIPT}" ]; then
+        echo "错误: 未找到 menuconfig 脚本: ${MENUCONFIG_SCRIPT}" >&2
         exit 1
     fi
     if ! command -v python3 &>/dev/null; then
         echo "错误: 未找到 python3，无法启动 menuconfig。" >&2
         exit 1
     fi
-    python3 "${menuconfig_script}"
+    python3 "${MENUCONFIG_SCRIPT}" --config "${CONFIG_FILE}"
     exit 0
 }
 
@@ -56,7 +55,9 @@ run_clean() {
 run_load() {
     local src_file="$1"
     if [ -z "${src_file}" ]; then
-        src_file="${DEFCONFIG_FILE}"
+        python3 "${MENUCONFIG_SCRIPT}" --write-default "${CONFIG_FILE}"
+        echo "[LOAD] 已根据模块清单生成默认配置"
+        exit 0
     fi
     if [ ! -f "${src_file}" ]; then
         echo "错误: 找不到配置文件 '${src_file}'" >&2
@@ -71,7 +72,7 @@ run_load() {
 run_save() {
     local dest_file="$1"
     if [ -z "${dest_file}" ]; then
-        dest_file="${DEFCONFIG_FILE}"
+        dest_file="${SCRIPT_DIR}/app.config.backup"
     fi
     if [ ! -f "${CONFIG_FILE}" ]; then
         echo "错误: 当前根目录下不存在 .config，无法保存" >&2
@@ -107,15 +108,10 @@ if [ "$#" -gt 0 ]; then
     esac
 fi
 
-# 编译前检查：如果 .config 不存在，则默认载入 tools/defconfig
+# 编译前检查：如果 .config 不存在，则根据模块清单生成默认配置
 if [ ! -f "${CONFIG_FILE}" ]; then
-    if [ -f "${DEFCONFIG_FILE}" ]; then
-        echo "[CONFIG] 自动载入默认配置文件 tools/defconfig 作为初始配置..."
-        cp "${DEFCONFIG_FILE}" "${CONFIG_FILE}"
-    else
-        echo "错误: 找不到默认配置文件 tools/defconfig，无法开始构建！" >&2
-        exit 1
-    fi
+    echo "[CONFIG] 根据模块清单生成默认配置..."
+    python3 "${MENUCONFIG_SCRIPT}" --write-default "${CONFIG_FILE}"
 fi
 
 # 打印编译信息

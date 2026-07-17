@@ -6,6 +6,7 @@
 #ifndef SYS_SERVICE_H
 #define SYS_SERVICE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -24,6 +25,15 @@ typedef struct {
 	const void *ops;
 	void *internal;
 } sys_service_ref_t;
+
+typedef struct {
+	uint32_t module_id;
+	uint32_t interface_id;
+	uint32_t abi_version;
+	const char *name;
+	size_t reference_count;
+	bool accepting;
+} sys_service_status_t;
 
 /**
  * @brief 注册一个模块接口。
@@ -47,5 +57,8 @@ sys_err_t sys_service_acquire(uint32_t module_id, uint32_t interface_id, uint32_
  * @brief 释放服务引用。
  */
 void sys_service_release(sys_service_ref_t *ref);
+
+/** @brief 获取服务注册状态快照。 */
+size_t sys_service_get_status(sys_service_status_t *statuses, size_t capacity);
 
 #endif

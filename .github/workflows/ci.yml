@@ -1,0 +1,52 @@
+name: App-Core CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            build_type: Debug
+          - compiler: gcc
+            build_type: Release
+          - compiler: clang
+            build_type: Debug
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DCMAKE_C_COMPILER=${{ matrix.compiler }}
+          -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        sanitizer: [address,undefined, thread]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_C_COMPILER=gcc
+          -DCMAKE_C_FLAGS="-fsanitize=${{ matrix.sanitizer }} -fno-omit-frame-pointer -O1 -g"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=${{ matrix.sanitizer }}"
+          -DAPP_CORE_TEST_INSTALL_PACKAGE=OFF
+          -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

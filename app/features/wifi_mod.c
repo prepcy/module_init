@@ -3,26 +3,34 @@
  * @brief WiFi 模块示例实现。
  */
 
-#include <stdio.h>
+#include <stdatomic.h>
 
 #include "wifi_mod.h"
+
+static atomic_bool g_wifi_connected;
 
 static sys_err_t wifi_real_connect(const char *ssid, const char *password)
 {
 	(void)password;
-	printf("[WiFi] connected to %s\n", ssid);
+	atomic_store_explicit(&g_wifi_connected, true, memory_order_release);
+	SYS_LOG_INFO_MSG("wifi", "connected to %s", ssid);
 	return SYS_OK;
 }
 
 static sys_err_t wifi_real_get_rssi(int *out_rssi)
 {
+	if (!atomic_load_explicit(&g_wifi_connected, memory_order_acquire)) {
+		return SYS_ERR_STATE;
+	}
 	*out_rssi = -45;
 	return SYS_OK;
 }
 
 static sys_err_t wifi_real_disconnect(void)
 {
-	printf("[WiFi] disconnected\n");
+	if (atomic_exchange_explicit(&g_wifi_connected, false, memory_order_acq_rel)) {
+		SYS_LOG_INFO_MSG("wifi", "disconnected");
+	}
 	return SYS_OK;
 }
 
@@ -38,13 +46,23 @@ static sys_err_t wifi_init(void)
 					    .ops = &g_wifi_ops,
 					    .name = "wifi.control"};
 
+	atomic_init(&g_wifi_connected, false);
 	return sys_service_register(&service);
 }
 
-static void wifi_exit(void)
+static sys_err_t wifi_stop(void)
 {
-	(void)sys_service_unregister(SYS_MOD_WIFI, WIFI_INTERFACE_CONTROL);
+	return wifi_real_disconnect();
 }
 
-SYS_COMPONENT_REGISTER(g_wifi_component, SYS_MOD_WIFI, "wifi", SYS_COMPONENT_PHASE_SERVICE, NULL, 0U, wifi_init,
-		       wifi_exit);
+static void wifi_deinit(void)
+{
+	sys_err_t ret = sys_service_unregister(SYS_MOD_WIFI, WIFI_INTERFACE_CONTROL);
+
+	if (ret != SYS_OK) {
+		SYS_LOG_ERROR_MSG("wifi", "service unregister failed: %s", sys_error_string(ret));
+	}
+}
+
+SYS_COMPONENT_REGISTER(g_wifi_component, .id = SYS_MOD_WIFI, .name = "wifi", .phase = SYS_COMPONENT_PHASE_SERVICE,
+		       .policy = SYS_COMPONENT_OPTIONAL, .init = wifi_init, .stop = wifi_stop, .deinit = wifi_deinit);

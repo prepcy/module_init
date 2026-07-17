@@ -1,0 +1,7 @@
+name=wifi
+id=0x0100
+config=ENABLE_WIFI
+prompt=启用 WiFi 模块
+default=y
+sources=wifi_mod.c
+depends=

@@ -15,6 +15,24 @@ typedef struct sys_buffer_pool sys_buffer_pool_t;
 typedef struct sys_buffer sys_buffer_t;
 typedef struct sys_channel sys_channel_t;
 
+typedef enum { SYS_CHANNEL_FULL_FAIL = 0, SYS_CHANNEL_FULL_DROP_OLDEST } sys_channel_full_policy_t;
+
+typedef struct {
+	size_t capacity;
+	sys_channel_full_policy_t full_policy;
+} sys_channel_config_t;
+
+typedef struct {
+	uint64_t sent_count;
+	uint64_t received_count;
+	uint64_t dropped_count;
+	uint64_t full_count;
+	uint64_t timeout_count;
+	size_t current_depth;
+	size_t high_watermark;
+	size_t capacity;
+} sys_channel_stats_t;
+
 /**
  * @brief 创建固定块数量和容量的缓冲池。
  */
@@ -70,10 +88,25 @@ uint64_t sys_buffer_sequence(const sys_buffer_t *buffer);
 /** @brief 设置缓冲区序列号。 */
 void sys_buffer_set_sequence(sys_buffer_t *buffer, uint64_t sequence);
 
+/** @brief 设置数据类型、格式版本和流代次。 */
+void sys_buffer_set_contract(sys_buffer_t *buffer, uint32_t type, uint32_t version, uint64_t generation);
+
+/** @brief 获取数据类型。 */
+uint32_t sys_buffer_type(const sys_buffer_t *buffer);
+
+/** @brief 获取数据格式版本。 */
+uint32_t sys_buffer_version(const sys_buffer_t *buffer);
+
+/** @brief 获取数据所属流代次。 */
+uint64_t sys_buffer_generation(const sys_buffer_t *buffer);
+
 /**
  * @brief 创建有界数据通道；创建者持有一个通道引用。
  */
 sys_err_t sys_channel_create(size_t capacity, sys_channel_t **out_channel);
+
+/** @brief 使用显式满队列策略创建数据通道。 */
+sys_err_t sys_channel_create_with_config(const sys_channel_config_t *config, sys_channel_t **out_channel);
 
 /**
  * @brief 增加通道所有权引用，适用于将通道交给另一个模块。
@@ -102,5 +135,8 @@ sys_err_t sys_channel_receive(sys_channel_t *channel, sys_buffer_t **out_buffer,
 
 /** @brief 获取当前排队缓冲区数量。 */
 size_t sys_channel_count(sys_channel_t *channel);
+
+/** @brief 获取通道运行统计。 */
+sys_err_t sys_channel_get_stats(sys_channel_t *channel, sys_channel_stats_t *out_stats);
 
 #endif

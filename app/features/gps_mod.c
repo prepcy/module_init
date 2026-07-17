@@ -26,9 +26,14 @@ static sys_err_t gps_init(void)
 	return sys_service_register(&service);
 }
 
-static void gps_exit(void)
+static void gps_deinit(void)
 {
-	(void)sys_service_unregister(SYS_MOD_GPS, GPS_INTERFACE_CONTROL);
+	sys_err_t ret = sys_service_unregister(SYS_MOD_GPS, GPS_INTERFACE_CONTROL);
+
+	if (ret != SYS_OK) {
+		SYS_LOG_ERROR_MSG("gps", "service unregister failed: %s", sys_error_string(ret));
+	}
 }
 
-SYS_COMPONENT_REGISTER(g_gps_component, SYS_MOD_GPS, "gps", SYS_COMPONENT_PHASE_SERVICE, NULL, 0U, gps_init, gps_exit);
+SYS_COMPONENT_REGISTER(g_gps_component, .id = SYS_MOD_GPS, .name = "gps", .phase = SYS_COMPONENT_PHASE_SERVICE,
+		       .policy = SYS_COMPONENT_OPTIONAL, .init = gps_init, .deinit = gps_deinit);

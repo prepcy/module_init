@@ -6,7 +6,6 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
-#include <string.h>
 #include <time.h>
 
 #include "camera_mod.h"
@@ -26,13 +25,13 @@ typedef enum {
 static pthread_mutex_t g_camera_mutex = PTHREAD_MUTEX_INITIALIZER;
 static camera_state_t g_camera_state = CAMERA_STATE_STOPPED;
 static atomic_bool g_camera_streaming;
-static pthread_t g_camera_thread;
-static bool g_camera_thread_started;
+static sys_thread_t *g_camera_thread;
 static sys_buffer_pool_t *g_camera_pool;
 static sys_channel_t *g_camera_channel;
 static camera_stream_config_t g_camera_config;
 static uint64_t g_frame_sequence;
 static uint64_t g_dropped_frames;
+static uint64_t g_stream_generation;
 
 static void sleep_milliseconds(unsigned int milliseconds)
 {
@@ -51,12 +50,12 @@ static uint64_t monotonic_microseconds(void)
 	return (uint64_t)now.tv_sec * 1000000U + (uint64_t)now.tv_nsec / 1000U;
 }
 
-static void *camera_producer(void *argument)
+static void *camera_producer(sys_thread_t *thread, void *argument)
 {
 	const unsigned int frame_interval_ms = 1000U / g_camera_config.fps;
 	(void)argument;
 
-	while (atomic_load_explicit(&g_camera_streaming, memory_order_acquire)) {
+	while (!sys_thread_stop_requested(thread)) {
 		sys_buffer_t *buffer;
 		sys_err_t ret = sys_buffer_acquire(g_camera_pool, &buffer);
 
@@ -72,9 +71,15 @@ static void *camera_producer(void *argument)
 			sys_buffer_release(buffer);
 			break;
 		}
-		(void)sys_buffer_set_size(buffer, (size_t)length + 1U);
+		ret = sys_buffer_set_size(buffer, (size_t)length + 1U);
+		if (ret != SYS_OK) {
+			sys_buffer_release(buffer);
+			break;
+		}
 		sys_buffer_set_sequence(buffer, g_frame_sequence++);
 		sys_buffer_set_timestamp(buffer, monotonic_microseconds());
+		sys_buffer_set_contract(buffer, CAMERA_BUFFER_TYPE_VIDEO_FRAME, CAMERA_BUFFER_FORMAT_VERSION,
+					g_stream_generation);
 
 		ret = sys_channel_send(g_camera_channel, buffer, 0);
 		if (ret != SYS_OK && ret != SYS_ERR_CLOSED) {
@@ -109,16 +114,21 @@ static sys_err_t calculate_frame_capacity(const camera_stream_config_t *config, 
 	return SYS_OK;
 }
 
-static void cleanup_stream_resources(void)
+static sys_err_t cleanup_stream_resources(void)
 {
+	sys_err_t ret = SYS_OK;
+
 	if (g_camera_channel != NULL) {
 		sys_channel_release(g_camera_channel);
 		g_camera_channel = NULL;
 	}
 	if (g_camera_pool != NULL) {
-		(void)sys_buffer_pool_wait_idle(g_camera_pool, 2000);
-		(void)sys_buffer_pool_destroy(&g_camera_pool);
+		ret = sys_buffer_pool_wait_idle(g_camera_pool, 2000);
+		if (ret == SYS_OK) {
+			ret = sys_buffer_pool_destroy(&g_camera_pool);
+		}
 	}
+	return ret;
 }
 
 static sys_err_t create_stream_resources(const camera_stream_config_t *config, size_t frame_capacity)
@@ -129,36 +139,61 @@ static sys_err_t create_stream_resources(const camera_stream_config_t *config, s
 		ret = sys_channel_create(config->buffer_count, &g_camera_channel);
 	}
 	if (ret != SYS_OK) {
-		cleanup_stream_resources();
+		sys_err_t cleanup_ret = cleanup_stream_resources();
+
+		if (cleanup_ret != SYS_OK) {
+			SYS_LOG_ERROR_MSG("camera", "stream resource rollback failed: %s",
+					  sys_error_string(cleanup_ret));
+		}
 		return ret;
 	}
 
 	g_camera_config = *config;
 	g_frame_sequence = 0U;
 	g_dropped_frames = 0U;
+	g_stream_generation++;
 	atomic_store_explicit(&g_camera_streaming, true, memory_order_release);
-	if (pthread_create(&g_camera_thread, NULL, camera_producer, NULL) != 0) {
+	ret = sys_thread_create("camera-producer", camera_producer, NULL, &g_camera_thread);
+	if (ret != SYS_OK) {
 		atomic_store_explicit(&g_camera_streaming, false, memory_order_release);
-		cleanup_stream_resources();
-		return SYS_ERR_GENERIC;
+		sys_err_t cleanup_ret = cleanup_stream_resources();
+
+		if (cleanup_ret != SYS_OK) {
+			SYS_LOG_ERROR_MSG("camera", "thread rollback failed: %s", sys_error_string(cleanup_ret));
+		}
+		return ret;
 	}
-	g_camera_thread_started = true;
 	return SYS_OK;
 }
 
 static void rollback_stream_start(const camera_stream_event_t *event)
 {
+	sys_err_t cleanup_ret = SYS_OK;
+	sys_err_t event_ret = SYS_OK;
+	sys_err_t join_ret;
+
 	pthread_mutex_lock(&g_camera_mutex);
 	g_camera_state = CAMERA_STATE_STOPPING;
 	pthread_mutex_unlock(&g_camera_mutex);
 	atomic_store_explicit(&g_camera_streaming, false, memory_order_release);
+	sys_thread_request_stop(g_camera_thread);
 	sys_channel_close(g_camera_channel);
-	pthread_join(g_camera_thread, NULL);
-	g_camera_thread_started = false;
-	(void)sys_event_publish_sync(CAMERA_EVENT_STREAM_STOPPING, event, sizeof(*event));
-	cleanup_stream_resources();
+	join_ret = sys_thread_join(&g_camera_thread, -1);
+	if (join_ret == SYS_OK) {
+		event_ret = sys_event_publish_sync(CAMERA_EVENT_STREAM_STOPPING, event, sizeof(*event));
+		cleanup_ret = cleanup_stream_resources();
+	}
+	if (join_ret != SYS_OK) {
+		SYS_LOG_ERROR_MSG("camera", "producer rollback failed: %s", sys_error_string(join_ret));
+	}
+	if (event_ret != SYS_OK) {
+		SYS_LOG_ERROR_MSG("camera", "consumer rollback failed: %s", sys_error_string(event_ret));
+	}
+	if (cleanup_ret != SYS_OK) {
+		SYS_LOG_ERROR_MSG("camera", "resource rollback failed: %s", sys_error_string(cleanup_ret));
+	}
 	pthread_mutex_lock(&g_camera_mutex);
-	g_camera_state = CAMERA_STATE_STOPPED;
+	g_camera_state = g_camera_pool == NULL && g_camera_thread == NULL ? CAMERA_STATE_STOPPED : CAMERA_STATE_ERROR;
 	pthread_mutex_unlock(&g_camera_mutex);
 }
 
@@ -185,8 +220,11 @@ static sys_err_t camera_real_start(const camera_stream_config_t *config)
 		return ret;
 	}
 
-	event.channel = g_camera_channel;
-	event.config = g_camera_config;
+	event = (camera_stream_event_t){.abi_version = CAMERA_STREAM_EVENT_ABI_VERSION,
+					.pixel_format = CAMERA_PIXEL_FORMAT_MOCK_YUV420,
+					.generation = g_stream_generation,
+					.channel = g_camera_channel,
+					.config = g_camera_config};
 	pthread_mutex_unlock(&g_camera_mutex);
 	ret = sys_event_publish_sync(CAMERA_EVENT_STREAM_STARTED, &event, sizeof(event));
 	if (ret != SYS_OK) {
@@ -197,8 +235,8 @@ static sys_err_t camera_real_start(const camera_stream_config_t *config)
 	pthread_mutex_lock(&g_camera_mutex);
 	g_camera_state = CAMERA_STATE_RUNNING;
 	pthread_mutex_unlock(&g_camera_mutex);
-	printf("[Camera] stream started: %ux%u @ %u fps, %zu buffers\n", config->width, config->height, config->fps,
-	       config->buffer_count);
+	SYS_LOG_INFO_MSG("camera", "stream started: %ux%u @ %u fps, %zu buffers", config->width, config->height,
+			 config->fps, config->buffer_count);
 	return SYS_OK;
 }
 
@@ -206,6 +244,7 @@ static sys_err_t camera_real_stop(void)
 {
 	camera_stream_event_t event;
 	sys_err_t event_ret;
+	sys_err_t thread_ret;
 	sys_err_t pool_ret = SYS_OK;
 
 	pthread_mutex_lock(&g_camera_mutex);
@@ -218,15 +257,22 @@ static sys_err_t camera_real_stop(void)
 		return SYS_ERR_BUSY;
 	}
 	g_camera_state = CAMERA_STATE_STOPPING;
-	event.channel = g_camera_channel;
-	event.config = g_camera_config;
+	event = (camera_stream_event_t){.abi_version = CAMERA_STREAM_EVENT_ABI_VERSION,
+					.pixel_format = CAMERA_PIXEL_FORMAT_MOCK_YUV420,
+					.generation = g_stream_generation,
+					.channel = g_camera_channel,
+					.config = g_camera_config};
 	pthread_mutex_unlock(&g_camera_mutex);
 
 	atomic_store_explicit(&g_camera_streaming, false, memory_order_release);
+	sys_thread_request_stop(g_camera_thread);
 	sys_channel_close(g_camera_channel);
-	if (g_camera_thread_started) {
-		pthread_join(g_camera_thread, NULL);
-		g_camera_thread_started = false;
+	thread_ret = sys_thread_join(&g_camera_thread, -1);
+	if (thread_ret != SYS_OK) {
+		pthread_mutex_lock(&g_camera_mutex);
+		g_camera_state = CAMERA_STATE_ERROR;
+		pthread_mutex_unlock(&g_camera_mutex);
+		return thread_ret;
 	}
 
 	event_ret = sys_event_publish_sync(CAMERA_EVENT_STREAM_STOPPING, &event, sizeof(event));
@@ -236,7 +282,7 @@ static sys_err_t camera_real_stop(void)
 	if (pool_ret == SYS_OK) {
 		pool_ret = sys_buffer_pool_destroy(&g_camera_pool);
 	}
-	printf("[Camera] stream stopped, dropped frames: %llu\n", (unsigned long long)g_dropped_frames);
+	SYS_LOG_INFO_MSG("camera", "stream stopped, dropped frames: %llu", (unsigned long long)g_dropped_frames);
 	pthread_mutex_lock(&g_camera_mutex);
 	g_camera_state = g_camera_pool == NULL ? CAMERA_STATE_STOPPED : CAMERA_STATE_ERROR;
 	pthread_mutex_unlock(&g_camera_mutex);
@@ -265,11 +311,20 @@ static sys_err_t camera_init(void)
 	return sys_service_register(&service);
 }
 
-static void camera_exit(void)
+static sys_err_t camera_component_stop(void)
 {
-	(void)camera_real_stop();
-	(void)sys_service_unregister(SYS_MOD_CAMERA, CAMERA_INTERFACE_CONTROL);
+	return camera_real_stop();
 }
 
-SYS_COMPONENT_REGISTER(g_camera_component, SYS_MOD_CAMERA, "camera", SYS_COMPONENT_PHASE_SERVICE, NULL, 0U, camera_init,
-		       camera_exit);
+static void camera_deinit(void)
+{
+	sys_err_t ret = sys_service_unregister(SYS_MOD_CAMERA, CAMERA_INTERFACE_CONTROL);
+
+	if (ret != SYS_OK) {
+		SYS_LOG_ERROR_MSG("camera", "service unregister failed: %s", sys_error_string(ret));
+	}
+}
+
+SYS_COMPONENT_REGISTER(g_camera_component, .id = SYS_MOD_CAMERA, .name = "camera", .phase = SYS_COMPONENT_PHASE_SERVICE,
+		       .policy = SYS_COMPONENT_REQUIRED, .init = camera_init, .stop = camera_component_stop,
+		       .deinit = camera_deinit);

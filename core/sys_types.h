@@ -22,9 +22,20 @@ typedef enum {
 	SYS_ERR_CLOSED = -10,
 	SYS_ERR_DEPENDENCY = -11,
 	SYS_ERR_STATE = -12,
-	SYS_ERR_ABI_MISMATCH = -13
+	SYS_ERR_ABI_MISMATCH = -13,
+	SYS_ERR_WOULD_BLOCK = -14,
+	SYS_ERR_CANCELLED = -15,
+	SYS_ERR_OVERFLOW = -16,
+	SYS_ERR_IO = -17,
+	SYS_ERR_PERMISSION = -18
 } sys_err_t;
 
 #define SYS_ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
+
+/** @brief 将框架错误码转换为稳定文本。 */
+const char *sys_error_string(sys_err_t error);
+
+/** @brief 将常见 errno 值转换为框架错误码。 */
+sys_err_t sys_error_from_errno(int error_number);
 
 #endif

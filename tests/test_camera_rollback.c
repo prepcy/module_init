@@ -39,6 +39,6 @@ int main(void)
 	TEST_CHECK(g_stop_event_count == 1);
 	TEST_CHECK(sys_event_unsubscribe(&stop_subscription) == SYS_OK);
 	TEST_CHECK(sys_event_unsubscribe(&start_subscription) == SYS_OK);
-	sys_core_shutdown();
+	TEST_CHECK(sys_core_shutdown() == SYS_OK);
 	return 0;
 }

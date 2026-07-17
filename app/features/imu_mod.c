@@ -27,9 +27,14 @@ static sys_err_t imu_init(void)
 	return sys_service_register(&service);
 }
 
-static void imu_exit(void)
+static void imu_deinit(void)
 {
-	(void)sys_service_unregister(SYS_MOD_IMU, IMU_INTERFACE_CONTROL);
+	sys_err_t ret = sys_service_unregister(SYS_MOD_IMU, IMU_INTERFACE_CONTROL);
+
+	if (ret != SYS_OK) {
+		SYS_LOG_ERROR_MSG("imu", "service unregister failed: %s", sys_error_string(ret));
+	}
 }
 
-SYS_COMPONENT_REGISTER(g_imu_component, SYS_MOD_IMU, "imu", SYS_COMPONENT_PHASE_SERVICE, NULL, 0U, imu_init, imu_exit);
+SYS_COMPONENT_REGISTER(g_imu_component, .id = SYS_MOD_IMU, .name = "imu", .phase = SYS_COMPONENT_PHASE_SERVICE,
+		       .policy = SYS_COMPONENT_OPTIONAL, .init = imu_init, .deinit = imu_deinit);

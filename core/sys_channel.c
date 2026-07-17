@@ -3,6 +3,8 @@
  * @brief 预分配缓冲池和有界数据通道实现。
  */
 
+#include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -20,6 +22,9 @@ struct sys_buffer {
 	size_t size;
 	uint64_t timestamp;
 	uint64_t sequence;
+	uint64_t generation;
+	uint32_t type;
+	uint32_t version;
 	size_t reference_count;
 };
 
@@ -42,6 +47,8 @@ struct sys_channel {
 	size_t head;
 	size_t count;
 	bool closed;
+	sys_channel_full_policy_t full_policy;
+	sys_channel_stats_t stats;
 	atomic_uint reference_count;
 };
 
@@ -77,10 +84,14 @@ sys_err_t sys_buffer_pool_create(size_t block_count, size_t block_capacity, sys_
 {
 	sys_buffer_pool_t *pool;
 
-	if (block_count == 0U || block_capacity == 0U || out_pool == NULL || block_count > SIZE_MAX / block_capacity) {
+	if (out_pool == NULL) {
 		return SYS_ERR_INVALID_PARAM;
 	}
 	*out_pool = NULL;
+	if (block_count == 0U || block_capacity == 0U || block_count > SIZE_MAX / block_capacity ||
+	    block_count > SIZE_MAX / sizeof(sys_buffer_t)) {
+		return SYS_ERR_INVALID_PARAM;
+	}
 	pool = calloc(1U, sizeof(*pool));
 	if (pool == NULL) {
 		return SYS_ERR_NO_MEMORY;
@@ -167,7 +178,7 @@ sys_err_t sys_buffer_pool_wait_idle(sys_buffer_pool_t *pool, int timeout_ms)
 		}
 		if (wait_ret != 0) {
 			pthread_mutex_unlock(&pool->mutex);
-			return SYS_ERR_TIMEOUT;
+			return wait_ret == ETIMEDOUT ? SYS_ERR_TIMEOUT : sys_error_from_errno(wait_ret);
 		}
 	}
 	pthread_mutex_unlock(&pool->mutex);
@@ -176,10 +187,13 @@ sys_err_t sys_buffer_pool_wait_idle(sys_buffer_pool_t *pool, int timeout_ms)
 
 sys_err_t sys_buffer_acquire(sys_buffer_pool_t *pool, sys_buffer_t **out_buffer)
 {
-	if (pool == NULL || out_buffer == NULL) {
+	if (out_buffer == NULL) {
 		return SYS_ERR_INVALID_PARAM;
 	}
 	*out_buffer = NULL;
+	if (pool == NULL) {
+		return SYS_ERR_INVALID_PARAM;
+	}
 	pthread_mutex_lock(&pool->mutex);
 	for (size_t i = 0; i < pool->block_count; i++) {
 		sys_buffer_t *buffer = &pool->buffers[i];
@@ -189,6 +203,9 @@ sys_err_t sys_buffer_acquire(sys_buffer_pool_t *pool, sys_buffer_t **out_buffer)
 			buffer->size = 0U;
 			buffer->timestamp = 0U;
 			buffer->sequence = 0U;
+			buffer->generation = 0U;
+			buffer->type = 0U;
+			buffer->version = 0U;
 			pool->buffers_in_use++;
 			*out_buffer = buffer;
 			pthread_mutex_unlock(&pool->mutex);
@@ -208,6 +225,10 @@ sys_err_t sys_buffer_retain(sys_buffer_t *buffer)
 	if (buffer->reference_count == 0U) {
 		pthread_mutex_unlock(&buffer->pool->mutex);
 		return SYS_ERR_STATE;
+	}
+	if (buffer->reference_count == SIZE_MAX) {
+		pthread_mutex_unlock(&buffer->pool->mutex);
+		return SYS_ERR_OVERFLOW;
 	}
 	buffer->reference_count++;
 	pthread_mutex_unlock(&buffer->pool->mutex);
@@ -281,19 +302,53 @@ void sys_buffer_set_sequence(sys_buffer_t *buffer, uint64_t sequence)
 	}
 }
 
+void sys_buffer_set_contract(sys_buffer_t *buffer, uint32_t type, uint32_t version, uint64_t generation)
+{
+	if (buffer != NULL) {
+		buffer->type = type;
+		buffer->version = version;
+		buffer->generation = generation;
+	}
+}
+
+uint32_t sys_buffer_type(const sys_buffer_t *buffer)
+{
+	return buffer == NULL ? 0U : buffer->type;
+}
+
+uint32_t sys_buffer_version(const sys_buffer_t *buffer)
+{
+	return buffer == NULL ? 0U : buffer->version;
+}
+
+uint64_t sys_buffer_generation(const sys_buffer_t *buffer)
+{
+	return buffer == NULL ? 0U : buffer->generation;
+}
+
 sys_err_t sys_channel_create(size_t capacity, sys_channel_t **out_channel)
+{
+	const sys_channel_config_t config = {.capacity = capacity, .full_policy = SYS_CHANNEL_FULL_FAIL};
+	return sys_channel_create_with_config(&config, out_channel);
+}
+
+sys_err_t sys_channel_create_with_config(const sys_channel_config_t *config, sys_channel_t **out_channel)
 {
 	sys_channel_t *channel;
 
-	if (capacity == 0U || out_channel == NULL) {
+	if (out_channel == NULL) {
 		return SYS_ERR_INVALID_PARAM;
 	}
 	*out_channel = NULL;
+	if (config == NULL || config->capacity == 0U || config->capacity > SIZE_MAX / sizeof(sys_buffer_t *) ||
+	    config->full_policy > SYS_CHANNEL_FULL_DROP_OLDEST) {
+		return SYS_ERR_INVALID_PARAM;
+	}
 	channel = calloc(1U, sizeof(*channel));
 	if (channel == NULL) {
 		return SYS_ERR_NO_MEMORY;
 	}
-	channel->queue = calloc(capacity, sizeof(sys_buffer_t *));
+	channel->queue = calloc(config->capacity, sizeof(sys_buffer_t *));
 	if (channel->queue == NULL) {
 		free(channel);
 		return SYS_ERR_NO_MEMORY;
@@ -316,7 +371,9 @@ sys_err_t sys_channel_create(size_t capacity, sys_channel_t **out_channel)
 		free(channel);
 		return SYS_ERR_GENERIC;
 	}
-	channel->capacity = capacity;
+	channel->capacity = config->capacity;
+	channel->full_policy = config->full_policy;
+	channel->stats.capacity = config->capacity;
 	atomic_init(&channel->reference_count, 1U);
 	*out_channel = channel;
 	return SYS_OK;
@@ -331,6 +388,9 @@ sys_err_t sys_channel_retain(sys_channel_t *channel)
 	}
 	references = atomic_load_explicit(&channel->reference_count, memory_order_relaxed);
 	while (references != 0U) {
+		if (references == UINT_MAX) {
+			return SYS_ERR_OVERFLOW;
+		}
 		if (atomic_compare_exchange_weak_explicit(&channel->reference_count, &references, references + 1U,
 							  memory_order_acquire, memory_order_relaxed)) {
 			return SYS_OK;
@@ -348,14 +408,12 @@ void sys_channel_release(sys_channel_t *channel)
 		return;
 	}
 
-	pthread_mutex_lock(&channel->mutex);
 	for (size_t i = 0; i < channel->count; i++) {
 		size_t index = (channel->head + i) % channel->capacity;
 
 		sys_buffer_release(channel->queue[index]);
 	}
 	channel->count = 0U;
-	pthread_mutex_unlock(&channel->mutex);
 	pthread_cond_destroy(&channel->not_empty);
 	pthread_cond_destroy(&channel->not_full);
 	pthread_mutex_destroy(&channel->mutex);
@@ -376,25 +434,30 @@ void sys_channel_close(sys_channel_t *channel)
 }
 
 static sys_err_t wait_for_channel_state(pthread_cond_t *condition, pthread_mutex_t *mutex, int timeout_ms,
-					const struct timespec *deadline)
+					const struct timespec *deadline, sys_err_t immediate_error)
 {
 	int ret;
 
 	if (timeout_ms == 0) {
-		return SYS_ERR_QUEUE_FULL;
+		return immediate_error;
 	}
 	if (timeout_ms < 0) {
 		ret = pthread_cond_wait(condition, mutex);
 	} else {
 		ret = pthread_cond_timedwait(condition, mutex, deadline);
 	}
-	return ret == 0 ? SYS_OK : SYS_ERR_TIMEOUT;
+	if (ret == 0) {
+		return SYS_OK;
+	}
+	return ret == ETIMEDOUT ? SYS_ERR_TIMEOUT : sys_error_from_errno(ret);
 }
 
 sys_err_t sys_channel_send(sys_channel_t *channel, sys_buffer_t *buffer, int timeout_ms)
 {
 	struct timespec deadline = {0};
+	sys_buffer_t *dropped = NULL;
 	sys_err_t ret;
+	bool full_observed = false;
 
 	if (channel == NULL || buffer == NULL) {
 		return SYS_ERR_INVALID_PARAM;
@@ -402,30 +465,56 @@ sys_err_t sys_channel_send(sys_channel_t *channel, sys_buffer_t *buffer, int tim
 	if (timeout_ms > 0) {
 		make_deadline(&deadline, timeout_ms);
 	}
+	ret = sys_buffer_retain(buffer);
+	if (ret != SYS_OK) {
+		return ret;
+	}
 
 	pthread_mutex_lock(&channel->mutex);
+	if (channel->count == channel->capacity) {
+		channel->stats.full_count++;
+		full_observed = true;
+	}
+	if (full_observed && channel->full_policy == SYS_CHANNEL_FULL_DROP_OLDEST && !channel->closed) {
+		dropped = channel->queue[channel->head];
+		channel->queue[channel->head] = NULL;
+		channel->head = (channel->head + 1U) % channel->capacity;
+		channel->count--;
+		channel->stats.dropped_count++;
+	}
 	while (channel->count == channel->capacity && !channel->closed) {
-		ret = wait_for_channel_state(&channel->not_full, &channel->mutex, timeout_ms, &deadline);
+		ret = wait_for_channel_state(&channel->not_full, &channel->mutex, timeout_ms, &deadline,
+					     SYS_ERR_QUEUE_FULL);
 		if (ret != SYS_OK) {
+			if (ret == SYS_ERR_TIMEOUT) {
+				channel->stats.timeout_count++;
+			}
 			pthread_mutex_unlock(&channel->mutex);
+			sys_buffer_release(buffer);
 			return ret;
 		}
 	}
 	if (channel->closed) {
 		pthread_mutex_unlock(&channel->mutex);
+		sys_buffer_release(buffer);
+		if (dropped != NULL) {
+			sys_buffer_release(dropped);
+		}
 		return SYS_ERR_CLOSED;
 	}
 
-	ret = sys_buffer_retain(buffer);
-	if (ret != SYS_OK) {
-		pthread_mutex_unlock(&channel->mutex);
-		return ret;
-	}
 	size_t index = (channel->head + channel->count) % channel->capacity;
 	channel->queue[index] = buffer;
 	channel->count++;
+	channel->stats.sent_count++;
+	if (channel->count > channel->stats.high_watermark) {
+		channel->stats.high_watermark = channel->count;
+	}
 	pthread_cond_signal(&channel->not_empty);
 	pthread_mutex_unlock(&channel->mutex);
+	if (dropped != NULL) {
+		sys_buffer_release(dropped);
+	}
 	return SYS_OK;
 }
 
@@ -444,10 +533,12 @@ sys_err_t sys_channel_receive(sys_channel_t *channel, sys_buffer_t **out_buffer,
 
 	pthread_mutex_lock(&channel->mutex);
 	while (channel->count == 0U && !channel->closed) {
-		ret = wait_for_channel_state(&channel->not_empty, &channel->mutex, timeout_ms, &deadline);
+		ret = wait_for_channel_state(&channel->not_empty, &channel->mutex, timeout_ms, &deadline,
+					     SYS_ERR_TIMEOUT);
 		if (ret != SYS_OK) {
+			channel->stats.timeout_count++;
 			pthread_mutex_unlock(&channel->mutex);
-			return timeout_ms == 0 ? SYS_ERR_TIMEOUT : ret;
+			return ret;
 		}
 	}
 	if (channel->count == 0U && channel->closed) {
@@ -459,6 +550,7 @@ sys_err_t sys_channel_receive(sys_channel_t *channel, sys_buffer_t **out_buffer,
 	channel->queue[channel->head] = NULL;
 	channel->head = (channel->head + 1U) % channel->capacity;
 	channel->count--;
+	channel->stats.received_count++;
 	pthread_cond_signal(&channel->not_full);
 	pthread_mutex_unlock(&channel->mutex);
 	return SYS_OK;
@@ -475,4 +567,16 @@ size_t sys_channel_count(sys_channel_t *channel)
 	count = channel->count;
 	pthread_mutex_unlock(&channel->mutex);
 	return count;
+}
+
+sys_err_t sys_channel_get_stats(sys_channel_t *channel, sys_channel_stats_t *out_stats)
+{
+	if (channel == NULL || out_stats == NULL) {
+		return SYS_ERR_INVALID_PARAM;
+	}
+	pthread_mutex_lock(&channel->mutex);
+	*out_stats = channel->stats;
+	out_stats->current_depth = channel->count;
+	pthread_mutex_unlock(&channel->mutex);
+	return SYS_OK;
 }

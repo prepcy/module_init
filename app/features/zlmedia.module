@@ -1,0 +1,7 @@
+name=zlmedia
+id=0x0500
+config=ENABLE_ZLMEDIA
+prompt=启用 ZLMedia 模块
+default=y
+sources=zlmedia_mod.c
+depends=ENABLE_CAMERA

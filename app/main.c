@@ -3,30 +3,28 @@
  * @brief 框架控制面、事件面和大流量数据面示例。
  */
 
-#include <stdio.h>
-#include <time.h>
-
 #include "camera_mod.h"
 #include "gps_mod.h"
 #include "imu_mod.h"
 #include "wifi_mod.h"
 #include "zlmedia_mod.h"
 
-static void sleep_milliseconds(unsigned int milliseconds)
-{
-	struct timespec delay = {.tv_sec = (time_t)(milliseconds / 1000U),
-				 .tv_nsec = (long)(milliseconds % 1000U) * 1000000L};
-
-	while (nanosleep(&delay, &delay) != 0) {
-	}
-}
-
 int main(void)
 {
 	int exit_code = 0;
-	sys_err_t ret = sys_core_init();
+	sys_runtime_t *runtime = NULL;
+	sys_err_t ret = sys_runtime_create(&runtime);
 	if (ret != SYS_OK) {
-		fprintf(stderr, "framework initialization failed: %d\n", ret);
+		SYS_LOG_ERROR_MSG("app", "runtime initialization failed: %s", sys_error_string(ret));
+		return 1;
+	}
+	ret = sys_core_init();
+	if (ret != SYS_OK) {
+		SYS_LOG_ERROR_MSG("app", "framework initialization failed: %s", sys_error_string(ret));
+		ret = sys_runtime_destroy(&runtime);
+		if (ret != SYS_OK) {
+			SYS_LOG_ERROR_MSG("app", "runtime rollback failed: %s", sys_error_string(ret));
+		}
 		return 1;
 	}
 
@@ -35,19 +33,19 @@ int main(void)
 		int rssi;
 
 		if (wifi_get_rssi(&rssi) == SYS_OK) {
-			printf("[App] WiFi RSSI: %d dBm\n", rssi);
+			SYS_LOG_INFO_MSG("app", "WiFi RSSI: %d dBm", rssi);
 		}
 	} else {
-		printf("[App] WiFi unavailable: %d\n", ret);
+		SYS_LOG_WARNING_MSG("app", "WiFi unavailable: %s", sys_error_string(ret));
 	}
 
 	double latitude;
 	double longitude;
 	ret = gps_get_coordinates(&latitude, &longitude);
 	if (ret == SYS_OK) {
-		printf("[App] location: %.4f, %.4f\n", latitude, longitude);
+		SYS_LOG_INFO_MSG("app", "location: %.4f, %.4f", latitude, longitude);
 	} else {
-		printf("[App] GPS unavailable: %d\n", ret);
+		SYS_LOG_WARNING_MSG("app", "GPS unavailable: %s", sys_error_string(ret));
 	}
 
 	float x;
@@ -55,25 +53,41 @@ int main(void)
 	float z;
 	ret = imu_get_acceleration(&x, &y, &z);
 	if (ret == SYS_OK) {
-		printf("[App] acceleration: %.1f, %.1f, %.1f\n", x, y, z);
+		SYS_LOG_INFO_MSG("app", "acceleration: %.1f, %.1f, %.1f", x, y, z);
 	} else {
-		printf("[App] IMU unavailable: %d\n", ret);
+		SYS_LOG_WARNING_MSG("app", "IMU unavailable: %s", sys_error_string(ret));
 	}
 
 	ret = camera_start_stream(30U, 1920U, 1080U);
 	if (ret == SYS_OK) {
 		(void)zlmedia_set_port(8555U);
-		sleep_milliseconds(500U);
+		ret = sys_runtime_wait(runtime, 500);
+		if (ret != SYS_ERR_TIMEOUT && ret != SYS_ERR_CANCELLED) {
+			SYS_LOG_ERROR_MSG("app", "runtime wait failed: %s", sys_error_string(ret));
+			exit_code = 1;
+		}
 		ret = camera_stop_stream();
 		if (ret != SYS_OK) {
-			fprintf(stderr, "camera stop failed: %d\n", ret);
+			SYS_LOG_ERROR_MSG("app", "camera stop failed: %s", sys_error_string(ret));
 			exit_code = 1;
 		}
 	} else {
-		printf("[App] Camera unavailable: %d\n", ret);
+		SYS_LOG_WARNING_MSG("app", "Camera unavailable: %s", sys_error_string(ret));
 	}
 
-	(void)wifi_disconnect();
-	sys_core_shutdown();
+	ret = wifi_disconnect();
+	if (ret != SYS_OK && ret != SYS_ERR_NOT_FOUND) {
+		SYS_LOG_WARNING_MSG("app", "WiFi disconnect failed: %s", sys_error_string(ret));
+	}
+	ret = sys_core_shutdown();
+	if (ret != SYS_OK) {
+		SYS_LOG_ERROR_MSG("app", "framework shutdown failed: %s", sys_error_string(ret));
+		exit_code = 1;
+	}
+	ret = sys_runtime_destroy(&runtime);
+	if (ret != SYS_OK) {
+		SYS_LOG_ERROR_MSG("app", "runtime shutdown failed: %s", sys_error_string(ret));
+		exit_code = 1;
+	}
 	return exit_code;
 }

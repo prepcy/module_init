@@ -1,0 +1,15 @@
+/**
+ * @file sys_version.h
+ * @brief App-Core framework version constants.
+ */
+
+#ifndef SYS_VERSION_H
+#define SYS_VERSION_H
+
+#define APP_CORE_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define APP_CORE_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define APP_CORE_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define APP_CORE_VERSION_STRING "@PROJECT_VERSION@"
+#define APP_CORE_ABI_VERSION 3U
+
+#endif

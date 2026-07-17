@@ -18,6 +18,10 @@
 
 #define CAMERA_EVENT_STREAM_STARTED 0x04000001U
 #define CAMERA_EVENT_STREAM_STOPPING 0x04000002U
+#define CAMERA_STREAM_EVENT_ABI_VERSION 1U
+#define CAMERA_BUFFER_TYPE_VIDEO_FRAME 0x04000001U
+#define CAMERA_BUFFER_FORMAT_VERSION 1U
+#define CAMERA_PIXEL_FORMAT_MOCK_YUV420 1U
 
 typedef struct {
 	unsigned int fps;
@@ -30,6 +34,9 @@ typedef struct {
  * 事件回调若要在回调返回后继续使用 channel，必须调用 sys_channel_retain()。
  */
 typedef struct {
+	uint32_t abi_version;
+	uint32_t pixel_format;
+	uint64_t generation;
 	sys_channel_t *channel;
 	camera_stream_config_t config;
 } camera_stream_event_t;

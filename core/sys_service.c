@@ -93,11 +93,14 @@ sys_err_t sys_service_acquire(uint32_t module_id, uint32_t interface_id, uint32_
 {
 	sys_service_slot_t *slot;
 
-	if (out_ref == NULL || module_id == 0U || interface_id == 0U || abi_version == 0U || minimum_ops_size == 0U) {
+	if (out_ref == NULL) {
 		return SYS_ERR_INVALID_PARAM;
 	}
 	out_ref->ops = NULL;
 	out_ref->internal = NULL;
+	if (module_id == 0U || interface_id == 0U || abi_version == 0U || minimum_ops_size == 0U) {
+		return SYS_ERR_INVALID_PARAM;
+	}
 
 	pthread_mutex_lock(&g_service_mutex);
 	slot = find_service(module_id, interface_id);
@@ -110,6 +113,10 @@ sys_err_t sys_service_acquire(uint32_t module_id, uint32_t interface_id, uint32_
 		return SYS_ERR_ABI_MISMATCH;
 	}
 
+	if (slot->reference_count == SIZE_MAX) {
+		pthread_mutex_unlock(&g_service_mutex);
+		return SYS_ERR_OVERFLOW;
+	}
 	slot->reference_count++;
 	out_ref->ops = slot->desc.ops;
 	out_ref->internal = slot;
@@ -136,6 +143,32 @@ void sys_service_release(sys_service_ref_t *ref)
 	pthread_mutex_unlock(&g_service_mutex);
 	ref->ops = NULL;
 	ref->internal = NULL;
+}
+
+size_t sys_service_get_status(sys_service_status_t *statuses, size_t capacity)
+{
+	size_t total = 0U;
+	size_t copied = 0U;
+
+	pthread_mutex_lock(&g_service_mutex);
+	for (size_t i = 0; i < SYS_SERVICE_MAX_ENTRIES; i++) {
+		const sys_service_slot_t *slot = &g_service_slots[i];
+
+		if (!slot->used) {
+			continue;
+		}
+		if (statuses != NULL && copied < capacity) {
+			statuses[copied++] = (sys_service_status_t){.module_id = slot->desc.module_id,
+								    .interface_id = slot->desc.interface_id,
+								    .abi_version = slot->desc.abi_version,
+								    .name = slot->desc.name,
+								    .reference_count = slot->reference_count,
+								    .accepting = slot->accepting};
+		}
+		total++;
+	}
+	pthread_mutex_unlock(&g_service_mutex);
+	return total;
 }
 
 void sys_service_registry_reset(void)
